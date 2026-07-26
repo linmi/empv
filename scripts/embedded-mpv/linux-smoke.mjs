@@ -31,7 +31,9 @@
 //   reparenting therefore remains RUNTIME-UNVERIFIED (compile-verified only).
 //   See the linux-smoke job comment in the workflow.
 import assert from 'node:assert/strict'
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -76,6 +78,13 @@ async function main() {
   }
   const fixture = path.resolve(fixturePath)
   log(`fixture: ${fixture}`)
+  const queueDir = mkdtempSync(path.join(tmpdir(), 'empv-linux-smoke-queue-'))
+  const playlistCopies = [1, 2].map((index) => {
+    const copyPath = path.join(queueDir, `entry-${index + 1}.mp4`)
+    copyFileSync(fixture, copyPath)
+    return copyPath
+  })
+  log(`queue:   ${playlistCopies.join(', ')}`)
   log(`addon:   ${ADDON_PATH}`)
 
   if (!process.env.DISPLAY) {
@@ -297,10 +306,15 @@ async function main() {
     }
     log(`seek(0) + play restarted and advanced to ${restartedSnapshot.positionSeconds}s OK`)
 
-    // 9. Append a second copy of the fixture. The initialization policy is
+    // 9. Grow the queue to a second entry. The initialization policy is
     //    keep-open=yes, so seeking the current entry to its tail must advance
     //    into entry 2 and resume playback.
-    addon.appendPlaylistEntry(sessionId, fixture, 'entry-2')
+    //
+    //    playlistSync takes the tail AFTER the session's own loaded source --
+    //    native prepends the path it actually handed mpv -- and reconciles by
+    //    media path, so the tail needs its own distinct file rather than a
+    //    repeat of the fixture's path.
+    addon.playlistSync(sessionId, [{ mediaPath: playlistCopies[0], title: 'entry-2' }])
     const appendSecondDeadline = Date.now() + PLAYLIST_BUDGET_MS
     let twoEntrySnapshot = null
     while (Date.now() < appendSecondDeadline) {
@@ -321,11 +335,11 @@ async function main() {
     if (!twoEntrySnapshot) {
       const lastPlaylistSnapshot = addon.getSessionSnapshot(sessionId)
       fail(
-        `playlistCount did not reach 2 within ${PLAYLIST_BUDGET_MS}ms after appending entry 2. ` +
+        `playlistCount did not reach 2 within ${PLAYLIST_BUDGET_MS}ms after syncing entry 2. ` +
           `Last count: ${lastPlaylistSnapshot ? lastPlaylistSnapshot.playlistCount : '(none)'}.`
       )
     }
-    log('appendPlaylistEntry(entry-2) surfaced playlistCount === 2 OK')
+    log('playlistSync(entry-2) surfaced playlistCount === 2 OK')
 
     addon.seek(sessionId, 4.5)
     const autoAdvanceDeadline = Date.now() + PLAYLIST_BUDGET_MS
@@ -359,7 +373,10 @@ async function main() {
     // 10. keep-open=always must stop on entry 2 rather than advancing to the
     //     newly appended entry 3. Hold a three-second stability window after
     //     reaching ended so a delayed automatic transition cannot pass.
-    addon.appendPlaylistEntry(sessionId, fixture, 'entry-3')
+    addon.playlistSync(sessionId, [
+      { mediaPath: playlistCopies[0], title: 'entry-2' },
+      { mediaPath: playlistCopies[1], title: 'entry-3' }
+    ])
     const appendThirdDeadline = Date.now() + PLAYLIST_BUDGET_MS
     let threeEntrySnapshot = null
     while (Date.now() < appendThirdDeadline) {
@@ -380,7 +397,7 @@ async function main() {
     if (!threeEntrySnapshot) {
       const lastPlaylistSnapshot = addon.getSessionSnapshot(sessionId)
       fail(
-        `playlistCount did not reach 3 within ${PLAYLIST_BUDGET_MS}ms after appending entry 3. ` +
+        `playlistCount did not reach 3 within ${PLAYLIST_BUDGET_MS}ms after syncing entry 3. ` +
           `Last count: ${lastPlaylistSnapshot ? lastPlaylistSnapshot.playlistCount : '(none)'}.`
       )
     }
@@ -588,6 +605,7 @@ async function main() {
     // 13. disposeSession must resolve even on the failure path so the process can
     //    tear mpv down before exit.
     await dispose()
+    rmSync(queueDir, { recursive: true, force: true })
   }
 
   log('SMOKE PASS')
