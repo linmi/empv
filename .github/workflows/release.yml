@@ -1,0 +1,390 @@
+# Builds the artefacts a release consists of and attaches them to a GitHub
+# Release. empv is not on npm: these tarballs are the distribution, and the
+# install instructions in the release body name both of them explicitly because
+# an optionalDependency can only be resolved from a registry.
+#
+# What each platform contributes, and why they are not symmetrical:
+#
+#   darwin-arm64, darwin-x64  the addon plus a libmpv runtime built here from
+#                             pinned sources with -Dgpl=false. macOS has no
+#                             system libmpv, so the package has to carry one,
+#                             and it has to be the LGPL build.
+#   win32-x64                 the addon alone. Every Windows libmpv build is
+#                             GPL, so bundling one would relicense whatever
+#                             ships it; the user supplies libmpv-2.dll.
+#   (no linux)                it would be addon-only, but the resolver looks for
+#                             the library inside the runtime directory and on
+#                             Linux it lives in /usr/lib. Until that discovery
+#                             exists, a linux package would install and then
+#                             fail to resolve.
+#
+# The two macOS builds run on separate runners on purpose: build-macos-runtime
+# configures every package for the host and does not cross-compile, and it now
+# refuses an arch that is not the host's rather than mislabel the output.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and verify everything without creating a release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # The platform-independent package: types, JS, and the source the addon is
+  # built from. No native toolchain involved, so it does not need to share a
+  # runner with anything that has one.
+  # ───────────────────────────────────────────────────────────────────────────
+  main-package:
+    name: main package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm (from packageManager field)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # A tag that disagrees with the manifest produces a release whose tarballs
+      # install under a different version than the tag promises. Catch it before
+      # anything is built rather than after it is published.
+      - name: Assert the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME}"
+          if [ "$tag" != "v${version}" ]; then
+            echo "Tag ${tag} does not match package version ${version} (expected v${version})."
+            exit 1
+          fi
+          echo "tag ${tag} matches version ${version}"
+
+      - name: Run the TypeScript tests and type check
+        run: |
+          pnpm run typecheck
+          pnpm run test:node
+
+      # `npm pack` runs prepack, which builds dist/.
+      - name: Pack
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/tarballs"
+          npm pack --pack-destination "${RUNNER_TEMP}/tarballs"
+          ls -l "${RUNNER_TEMP}/tarballs"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-main
+          path: ${{ runner.temp }}/tarballs/*.tgz
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # macOS: build the LGPL runtime from pinned sources, link the addon against
+  # it, then prove the resulting tarball works by installing it into an empty
+  # project outside the checkout and opening a real mpv session there.
+  # ───────────────────────────────────────────────────────────────────────────
+  macos:
+    name: macos-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+          - arch: x64
+            runner: macos-13
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native -> target
+          key: release-${{ matrix.arch }}
+
+      # curl, tar, make, git and patch are on the image already; these are not.
+      - name: Install the runtime build tools
+        run: brew install meson ninja nasm pkg-config
+
+      - name: Setup pnpm (from packageManager field)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # Seven packages from source takes the better part of an hour. The output
+      # is a pure function of the pinned versions, the patches and the meson and
+      # configure flags, so the key covers exactly those: change any of them and
+      # the cache misses and it rebuilds.
+      - name: Cache the built LGPL runtime
+        id: runtime-cache
+        uses: actions/cache@v4
+        with:
+          path: runtime-prefix
+          key: >-
+            empv-lgpl-runtime-${{ matrix.arch }}-${{ hashFiles(
+              'scripts/embedded-mpv/runtime-pins.mjs',
+              'scripts/embedded-mpv/build-macos-runtime.mjs',
+              'scripts/embedded-mpv/patches/**'
+            ) }}
+
+      - name: Build the LGPL libmpv runtime from pinned sources
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        run: pnpm run build-runtime:macos -- ${{ matrix.arch }} "${GITHUB_WORKSPACE}/runtime-prefix"
+
+      - name: Stage the runtime into the package
+        run: pnpm run stage-runtime:macos -- ${{ matrix.arch }} "${GITHUB_WORKSPACE}/runtime-prefix"
+
+      # EMPV_REQUIRE stops the build from degrading to "embedded mpv
+      # unavailable" and writing a marker file, which is the right behaviour for
+      # a contributor without a staged runtime and the wrong one for a release.
+      - name: Build the addon against the staged runtime
+        env:
+          EMPV_REQUIRE: '1'
+        run: pnpm run build:native
+
+      - name: Assert the addon carries the release runtime
+        run: |
+          set -euo pipefail
+          manifest=dist/native/runtime-manifest.json
+          origin="$(node -p "require('./${manifest}').origin")"
+          arch="$(node -p "require('./${manifest}').arch")"
+          if [ "$origin" != "vendored-lgpl" ]; then
+            echo "Refusing to release a \"${origin}\" runtime."
+            exit 1
+          fi
+          if [ "$arch" != "${{ matrix.arch }}" ]; then
+            echo "Staged runtime is ${arch}, this job builds ${{ matrix.arch }}."
+            exit 1
+          fi
+          # The label says arm64/x64; ask the binary itself.
+          file dist/native/empv.node
+          lipo -archs dist/native/empv.node
+          echo "origin=${origin} arch=${arch}"
+
+      # Packs the platform package, installs it and the main package into an
+      # empty project outside this checkout, and opens a real mpv session there.
+      # This is the step that catches a tarball whose `files` list forgot
+      # something or whose dylibs are present under names nothing loads.
+      - name: Verify the prebuilt end to end
+        run: pnpm run verify:prebuilt
+
+      - name: Pack the platform package
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/tarballs"
+          cd "platform-packages/empv-darwin-${{ matrix.arch }}"
+          npm pack --pack-destination "${RUNNER_TEMP}/tarballs"
+          ls -l "${RUNNER_TEMP}/tarballs"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-darwin-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tarballs/*.tgz
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Windows: addon only. There is no runtime to build, and no dlopen check to
+  # run here either -- the package deliberately ships without libmpv-2.dll, so
+  # loading it would be testing a DLL this release does not distribute. The
+  # native compile gate already drives a real session against the pinned runtime
+  # on every push.
+  # ───────────────────────────────────────────────────────────────────────────
+  windows:
+    name: windows-x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native -> target
+          key: release-win32
+
+      - name: Setup pnpm (from packageManager field)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Compile the addon
+        run: |
+          pnpm exec napi build \
+            --release \
+            --target x86_64-pc-windows-msvc \
+            --cwd "${GITHUB_WORKSPACE}/native" \
+            --manifest-path "${GITHUB_WORKSPACE}/native/Cargo.toml" \
+            --package-json-path "${GITHUB_WORKSPACE}/package.json" \
+            --output-dir "${GITHUB_WORKSPACE}/native/build/Release"
+
+      - name: Pack the platform package
+        run: |
+          set -euo pipefail
+          pnpm run pack:platform -- win32 x64 --from native/build/Release
+          mkdir -p "${RUNNER_TEMP}/tarballs"
+          cd platform-packages/empv-win32-x64
+          npm pack --pack-destination "${RUNNER_TEMP}/tarballs"
+          ls -l "${RUNNER_TEMP}/tarballs"
+
+      # A package that carries a libmpv would be a licensing mistake, not a
+      # packaging one, so it is asserted rather than left to review.
+      - name: Assert no libmpv was bundled
+        run: |
+          set -euo pipefail
+          if compgen -G "platform-packages/empv-win32-x64/*.dll" > /dev/null; then
+            echo "The Windows package must not bundle a DLL: every libmpv build for Windows is GPL."
+            exit 1
+          fi
+          test -f platform-packages/empv-win32-x64/empv.node
+          echo "addon-only, as intended"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-win32-x64
+          path: ${{ runner.temp }}/tarballs/*.tgz
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Publish. Runs only for a tag, and only once every platform has produced its
+  # tarball -- a release missing a platform is worse than a late one, because
+  # installs on that platform fail with a resolver error rather than an
+  # unavailable download.
+  # ───────────────────────────────────────────────────────────────────────────
+  release:
+    name: release
+    needs: [main-package, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/') && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download every tarball
+        uses: actions/download-artifact@v4
+        with:
+          path: tarballs
+          pattern: tarball-*
+          merge-multiple: true
+
+      - name: Checksum
+        run: |
+          set -euo pipefail
+          cd tarballs
+          ls -l
+          sha256sum ./*.tgz | sed 's|\./||' > SHASUMS256.txt
+          cat SHASUMS256.txt
+
+      # empv is not on npm, so the optionalDependency cannot resolve: the
+      # platform package has to be named on the command line alongside the main
+      # one. Saying so here is the difference between a release that installs
+      # and one that installs without an addon and fails at first use.
+      - name: Write the release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          version="${TAG#v}"
+          cat > notes.md <<EOF
+          ## Install
+
+          empv is not published to npm yet, so the platform package cannot be
+          resolved as an optional dependency and has to be installed alongside
+          the main one:
+
+          \`\`\`sh
+          # macOS, Apple Silicon
+          npm install ${base}/empv-${version}.tgz ${base}/empv-darwin-arm64-${version}.tgz
+
+          # macOS, Intel
+          npm install ${base}/empv-${version}.tgz ${base}/empv-darwin-x64-${version}.tgz
+
+          # Windows
+          npm install ${base}/empv-${version}.tgz ${base}/empv-win32-x64-${version}.tgz
+          \`\`\`
+
+          No Rust toolchain is needed: the addon in each platform package is prebuilt.
+
+          ## What is in each package
+
+          The macOS packages carry \`empv.node\` and a libmpv runtime built from
+          pinned sources with \`-Dgpl=false\`. Those libraries are
+          LGPL-2.1-or-later; \`THIRD-PARTY-NOTICES.md\` lists their versions and
+          sources and \`runtime-manifest.json\` records the exact build inputs.
+
+          The Windows package carries \`empv.node\` alone. Every libmpv build
+          available for Windows is GPL, and bundling one would relicense whatever
+          ships it, so you supply your own: put \`libmpv-2.dll\` in the package
+          directory next to \`empv.node\`.
+
+          There is no Linux package. It would be addon-only too, but the runtime
+          resolver only looks for libmpv inside the runtime directory, and on
+          Linux it lives in \`/usr/lib\`.
+
+          empv itself is Apache-2.0.
+          EOF
+          cat notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${TAG}" \
+            --notes-file notes.md \
+            tarballs/*.tgz tarballs/SHASUMS256.txt

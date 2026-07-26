@@ -89,6 +89,62 @@ function readLoadCommands(binaryPath) {
     .filter((name) => path.basename(name) !== self)
 }
 
+// What the addon actually is, read out of its own header rather than inferred
+// from where it was found. `--from` points this script at whatever directory a
+// build left its output in, and the runtime manifest -- the only other evidence
+// available -- records the arch but not the platform, so pointing a `win32 x64`
+// pack at a macOS build directory would produce an `os: ["win32"]` package
+// carrying a Mach-O binary. npm would install it happily and dlopen would fail
+// on a machine nobody involved in the release owns.
+function readBinaryTarget(binaryPath) {
+  const header = readFileSync(binaryPath)
+
+  // Mach-O: magic, then cputype. A fat binary is not something any build here
+  // produces, so it is left to fall through to "unrecognised" rather than
+  // handled speculatively.
+  const magic = header.readUInt32LE(0)
+  if (magic === 0xfeedface || magic === 0xfeedfacf) {
+    const cpuType = header.readInt32LE(4)
+    const architectures = new Map([
+      [0x0100000c, 'arm64'],
+      [0x01000007, 'x64']
+    ])
+    return { platform: 'darwin', arch: architectures.get(cpuType) ?? `cputype ${cpuType}` }
+  }
+
+  // PE: the DOS stub carries the offset of the COFF header, whose first field
+  // is the machine type.
+  if (header.readUInt16LE(0) === 0x5a4d) {
+    const coffOffset = header.readUInt32LE(0x3c)
+    if (header.readUInt32LE(coffOffset) !== 0x00004550) {
+      throw new Error(`${binaryPath} starts with MZ but has no PE header.`)
+    }
+    const machine = header.readUInt16LE(coffOffset + 4)
+    const architectures = new Map([
+      [0x8664, 'x64'],
+      [0xaa64, 'arm64']
+    ])
+    return {
+      platform: 'win32',
+      arch: architectures.get(machine) ?? `machine 0x${machine.toString(16)}`
+    }
+  }
+
+  if (header.readUInt32BE(0) === 0x7f454c46) {
+    const machine = header.readUInt16LE(0x12)
+    const architectures = new Map([
+      [0x3e, 'x64'],
+      [0xb7, 'arm64']
+    ])
+    return {
+      platform: 'linux',
+      arch: architectures.get(machine) ?? `machine 0x${machine.toString(16)}`
+    }
+  }
+
+  throw new Error(`${binaryPath} is not a Mach-O, PE or ELF binary.`)
+}
+
 // Every library reachable from the addon, keyed by the name its dependents use.
 function collectReferencedLibraries(addonPath, libraryDirectory) {
   const wanted = new Map()
@@ -148,6 +204,15 @@ function main() {
     )
   }
 
+  const addonPath = path.join(sourceDirectory, 'empv.node')
+  const built = readBinaryTarget(addonPath)
+  if (built.platform !== platform || built.arch !== arch) {
+    return fail(
+      `${path.relative(packageRoot, addonPath)} is a ${built.platform}-${built.arch} binary, ` +
+        `but this would package it as ${platform}-${arch}.`
+    )
+  }
+
   const bundlesRuntime = BUNDLES_RUNTIME.has(platform)
   const manifestPath = path.join(sourceDirectory, 'runtime-manifest.json')
   // Only a package that carries the runtime needs the manifest describing it.
@@ -169,10 +234,11 @@ function main() {
         'A published prebuilt must carry the vendored LGPL runtime built from pinned sources.'
     )
   }
-  if (runtimeManifest.platform && runtimeManifest.platform !== platform) {
-    return fail(
-      `The built runtime is for ${runtimeManifest.platform}-${runtimeManifest.arch}, not ${platform}-${arch}.`
-    )
+  // The addon's own header settles what it is; this settles what the staged
+  // runtime beside it was built for. They can only disagree if a build reused a
+  // directory, which is exactly the case worth catching.
+  if (bundlesRuntime && runtimeManifest.arch !== arch) {
+    return fail(`The staged runtime is ${String(runtimeManifest.arch)}, not ${arch}.`)
   }
 
   const name = `empv-${platform}-${arch}`

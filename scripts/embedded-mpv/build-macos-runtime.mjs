@@ -74,6 +74,21 @@ if (!validArchitectures.has(arch) || !rawPrefix) {
   process.exit(1)
 }
 
+// Nothing here cross-compiles: every package is configured for the host and the
+// arch argument only chooses the build root and the label on the manifest. Asked
+// for x64 on an Apple Silicon runner it would happily produce arm64 binaries,
+// stage them under darwin-x64, and the mismatch would not surface until a user
+// on an Intel Mac installed the prebuilt and got "mach-o file, but is an
+// incompatible architecture" out of dlopen. Refuse at the top instead.
+if (arch !== process.arch) {
+  console.error(
+    `Cannot build a ${arch} runtime on a ${process.arch} host: this script configures ` +
+      'every package for the host machine and does not cross-compile. Build each ' +
+      'architecture on a machine of that architecture.'
+  )
+  process.exit(1)
+}
+
 const prefix = path.resolve(rawPrefix)
 const buildRoot = runtimeBuildRoot(arch)
 const archiveRoot = path.join(buildRoot, 'archives')
