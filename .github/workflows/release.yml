@@ -257,6 +257,12 @@ jobs:
       - name: Verify the prebuilt end to end
         run: pnpm run verify:prebuilt
 
+      # Against the runtime that actually ships, which is the only place the
+      # zero-copy videotoolbox assertion means anything: it is the vendored build
+      # that carries the videotoolbox-gl patch.
+      - name: Measure decode, render cadence and CPU
+        run: pnpm run benchmark:macos -- --strict
+
       - name: Pack the platform package
         run: |
           set -euo pipefail

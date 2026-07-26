@@ -6,6 +6,7 @@
 //
 //   node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs
 //   node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs --json
+//   node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs --strict
 //
 // WHAT IS AND IS NOT MEASURED
 //
@@ -276,22 +277,61 @@ async function measureCase(addon, testCase, fixture) {
   }
 }
 
-// Properties, not magnitudes. A benchmark that asserted "CPU below 40%" would
-// fail on a busy runner and pass on a fast one while a real regression hid inside
-// the margin; these are things that must hold on any machine that can play the
-// file at all, and each one is a failure mode that is otherwise silent.
+// Two kinds of check, and conflating them is what makes a benchmark gate get
+// ignored.
+//
+// INVARIANTS hold on any machine that can play the file at all: which decoder
+// mpv chose, whether frames reach the notifier, whether the snapshot coalescing
+// budget is respected. None of them moves with load. They always fail hard.
+//
+// MEASUREMENTS are of the machine as much as of empv. A ten-second window on a
+// shared CI VM can lose a frame to scheduling with nothing wrong; asserting zero
+// there produces a gate that goes red for reasons no one can act on, and a red
+// gate nobody can act on gets muted. So by default they carry a tolerance sized
+// to the failure model rather than to convenience: one scheduling hiccup costs a
+// frame or two, while a real regression -- software decode, a wrong render size,
+// a stalled pool -- drops continuously and blows past any of these by an order of
+// magnitude. --strict removes the tolerance, and is what the release build uses:
+// there the machine is measuring the artefact that ships, and a flake is worth a
+// re-run.
+const STRICT = process.argv.includes('--strict')
+// Under 1% of the frames actually rendered. At 60fps over ten seconds that is
+// six frames, which no continuous fault stays under.
+const DROPPED_FRAME_BUDGET = 0.01
+// Within 10% of the file's own container rate when strict, 20% otherwise. The
+// expected value comes from the file, not from this script, so neither number is
+// a throughput claim.
+const FPS_TOLERANCE = STRICT ? 0.9 : 0.8
+
 function assertHealthy(result, testCase) {
-  // Hardware decode falling back to software is invisible: the picture is
-  // identical and only the CPU number moves. This is the assertion that catches
-  // a runtime built without --enable-videotoolbox.
-  assert.ok(
-    result.hwdec && result.hwdec !== 'no',
-    `${result.id}: expected hardware decoding, got hwdecCurrent=${String(result.hwdec)}`
+  // Exactly 'videotoolbox', which is the zero-copy path: the decoded
+  // CVPixelBuffer becomes a GL texture through hwdec_vt.c's interop driver.
+  //
+  // Not "any hardware decoder", because mpv autoprobes and whitelists
+  // 'videotoolbox-copy' as well, and that one is also hardware decoding -- it
+  // just reads every frame back to system memory and re-uploads it. At 2160p
+  // that is a full-frame round trip 30 times a second, and it looks exactly like
+  // the zero-copy path from the outside. It is the state this build lands in if
+  // the videotoolbox-gl patch ever stops taking effect, so an assertion that
+  // accepted it would go green on precisely the regression it exists to catch.
+  assert.equal(
+    result.hwdec,
+    'videotoolbox',
+    `${result.id}: expected the zero-copy videotoolbox interop, got ` +
+      `hwdecCurrent=${String(result.hwdec)}` +
+      (result.hwdec === 'videotoolbox-copy'
+        ? ' -- hardware decoding, but copying every frame through system memory'
+        : '')
   )
 
   // Dropped frames during steady-state playback of a file the machine can
-  // decode are the definition of not keeping up.
-  assert.equal(result.droppedFrames, 0, `${result.id}: dropped ${result.droppedFrames} frames`)
+  // decode are the definition of not keeping up. Measurement, not invariant.
+  const droppedBudget = STRICT ? 0 : Math.floor(result.framesRendered * DROPPED_FRAME_BUDGET)
+  assert.ok(
+    result.droppedFrames <= droppedBudget,
+    `${result.id}: dropped ${result.droppedFrames} of ${result.framesRendered} frames ` +
+      `(budget ${droppedBudget}${STRICT ? ', --strict' : ''})`
+  )
 
   // The pool must actually be driven. A session that renders nothing still
   // reports "playing" and still advances its clock, so frame count is the only
@@ -301,13 +341,15 @@ function assertHealthy(result, testCase) {
     `${result.id}: no frames reached the notifier during ${result.measuredMs}ms`
   )
 
-  // Within 10% of the container rate. Not an absolute throughput claim -- it is
-  // the file's own rate, read from the file -- so it holds regardless of how fast
-  // the machine is, and fails if rendering silently halves.
+  // Tracks the container rate. Not an absolute throughput claim -- the expected
+  // value is read out of the file -- so it holds regardless of how fast the
+  // machine is, and fails if rendering silently halves. Measurement, not
+  // invariant.
   const expectedFps = result.source.containerFps ?? testCase.fps
   assert.ok(
-    result.renderedFps > expectedFps * 0.9,
-    `${result.id}: rendered ${result.renderedFps}fps against a ${expectedFps}fps source`
+    result.renderedFps > expectedFps * FPS_TOLERANCE,
+    `${result.id}: rendered ${result.renderedFps}fps against a ${expectedFps}fps source ` +
+      `(floor ${(expectedFps * FPS_TOLERANCE).toFixed(1)})`
   )
 
   // The coalescing contract: position churn is collapsed to at most one
@@ -365,7 +407,10 @@ async function main() {
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify({ platform: process.platform, results }, null, 2))
   }
-  log('PASS: every case decoded in hardware, dropped nothing, and kept up with its source.')
+  log(
+    `PASS${STRICT ? ' (strict)' : ''}: every case used the zero-copy interop and kept up ` +
+      'with its source.'
+  )
 }
 
 main().catch((error) => {

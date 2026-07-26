@@ -12,8 +12,10 @@ import {
   downloadSources,
   ensureTools,
   log,
+  missingFeatures,
   packagesMetadata,
   run,
+  runCapture,
   sourceMetadata
 } from './runtime-build-core.mjs'
 import { mpvPatchesByPlatform, mpvSource, runtimeBuildRoot } from './runtime-pins.mjs'
@@ -193,24 +195,69 @@ function configureMakeInstall(packageId, configureArgs) {
   run('make', ['install'], { cwd: packageSourcePath, env })
 }
 
+function mesonSetupArgs(buildDir, mesonArgs) {
+  return [
+    'setup',
+    buildDir,
+    `--prefix=${prefix}`,
+    '--libdir=lib',
+    '--buildtype=release',
+    '--default-library=shared',
+    ...mesonArgs
+  ]
+}
+
 function mesonInstall(packageId, mesonArgs) {
   const packageSourcePath = sourcePathFor(packageId)
   const buildDir = path.join(packageSourcePath, 'build-empv')
   const env = buildEnv()
   fs.rmSync(buildDir, { recursive: true, force: true })
-  run(
-    'meson',
-    [
-      'setup',
-      buildDir,
-      `--prefix=${prefix}`,
-      '--libdir=lib',
-      '--buildtype=release',
-      '--default-library=shared',
-      ...mesonArgs
-    ],
-    { cwd: packageSourcePath, env }
-  )
+  run('meson', mesonSetupArgs(buildDir, mesonArgs), { cwd: packageSourcePath, env })
+  run('meson', ['compile', '-C', buildDir], { cwd: packageSourcePath, env })
+  run('meson', ['install', '-C', buildDir], { cwd: packageSourcePath, env })
+}
+
+// What this runtime has to come out with. meson disables a feature whose
+// dependency it cannot find and then exits 0, so nothing about a build that
+// quietly lost one looks different -- and for videotoolbox-gl in particular the
+// consequence is invisible at runtime too: mpv falls back to
+// videotoolbox-copy, which is still hardware decoding and still plays
+// correctly, while reading every decoded frame back through system memory.
+//
+// verify:runtime-patches already checks that the patch applies and that this
+// script still passes -Dvideotoolbox-gl=enabled. Neither of those says the
+// feature ended up enabled. This does.
+const REQUIRED_MPV_FEATURES = [
+  // The patched zero-copy VideoToolbox <-> OpenGL interop (hwdec_mac_gl.c).
+  'videotoolbox-gl',
+  // Audio output. coreaudio is deliberately off, so this is the only one left.
+  'avfoundation',
+  // vo=libmpv renders through the GL renderer.
+  'gl',
+  'libass',
+  'libplacebo'
+]
+
+/// mpv is configured through runCapture so its feature summary can be asserted;
+/// every other package here is built for its side effects only.
+function mesonInstallMpv(mesonArgs) {
+  const packageSourcePath = sourcePathFor('mpv')
+  const buildDir = path.join(packageSourcePath, 'build-empv')
+  const env = buildEnv()
+  fs.rmSync(buildDir, { recursive: true, force: true })
+
+  const output = runCapture('meson', mesonSetupArgs(buildDir, mesonArgs), {
+    cwd: packageSourcePath,
+    env
+  })
+  process.stdout.write(`${output}\n`)
+
+  const missing = missingFeatures(output, REQUIRED_MPV_FEATURES)
+  if (missing.length > 0) {
+    throw new Error(`mpv configured without required feature(s): ${missing.join(', ')}.`)
+  }
+  log(`mpv enabled every required feature: ${REQUIRED_MPV_FEATURES.join(' ')}`)
+
   run('meson', ['compile', '-C', buildDir], { cwd: packageSourcePath, env })
   run('meson', ['install', '-C', buildDir], { cwd: packageSourcePath, env })
 }
@@ -264,7 +311,7 @@ function buildRuntime() {
     '-Dunwind=disabled',
     '-Dxxhash=disabled'
   ])
-  mesonInstall('mpv', mpvMesonFlags)
+  mesonInstallMpv(mpvMesonFlags)
 }
 
 function listDylibs(directoryPath) {
