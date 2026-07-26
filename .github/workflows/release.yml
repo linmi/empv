@@ -340,17 +340,25 @@ jobs:
         if: steps.runtime-cache.outputs.cache-hit != 'true'
         run: pnpm run build-runtime:windows -- x64 "${GITHUB_WORKSPACE}/windows-runtime-prefix"
 
-      # Only the header, the DLL and the manifest cross to the Windows job. The
-      # rest of the prefix is a few hundred megabytes of static archives that
+      # Only the header, the one DLL and the manifest cross to the Windows job.
+      # The rest of the prefix is a few hundred megabytes of static archives that
       # were link inputs and are of no use downstream.
+      #
+      # The DLL is named from the manifest rather than globbed. bin/ also holds
+      # whatever the dependency builds happened to install there -- shaderc puts
+      # libshaderc_shared.dll and libSPIRV-Tools-shared.dll in it, neither of
+      # which anything links -- and a glob carried all three through staging and
+      # into the package before the licence assertion caught it. What ships is one
+      # DLL by design, so this copies exactly the one the build says it produced.
       - name: Collect what the Windows build needs
         run: |
           set -euo pipefail
           prefix="${GITHUB_WORKSPACE}/windows-runtime-prefix"
           out="${RUNNER_TEMP}/libmpv-lgpl"
+          library="$(node -p "require('${prefix}/runtime-manifest.json').library")"
           mkdir -p "${out}/bin"
           cp -R "${prefix}/include" "${out}/include"
-          cp "${prefix}"/bin/*.dll "${out}/bin/"
+          cp "${prefix}/bin/${library}" "${out}/bin/${library}"
           cp "${prefix}/runtime-manifest.json" "${out}/"
           ls -l "${out}/bin"
           du -sh "${out}"
