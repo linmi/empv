@@ -69,8 +69,17 @@ pub fn reconcile_playlist(
         return Ok(ops);
     };
 
-    let Some(kept_target) = desired.iter().position(|path| *path == kept_path) else {
-        return Err(PlaylistSyncError::CurrentEntryNotInDesired { path: kept_path });
+    // Which slot of `desired` the playing entry becomes. A queue may hold the
+    // same path more than once, so prefer the slot it already occupies: keeping
+    // the index stable means a sync that did not move this entry does not move
+    // it in the UI either. Otherwise take the first occurrence.
+    let kept_target = if desired.get(kept_index as usize) == Some(&kept_path) {
+        kept_index as usize
+    } else {
+        let Some(first) = desired.iter().position(|path| *path == kept_path) else {
+            return Err(PlaylistSyncError::CurrentEntryNotInDesired { path: kept_path });
+        };
+        first
     };
 
     // Strip everything but the playing entry, highest index first so no removal
@@ -81,9 +90,16 @@ pub fn reconcile_playlist(
         .map(PlaylistOp::Remove)
         .collect();
 
-    // The playing entry is now the only one left, at index 0. Append the rest of
-    // the desired queue in order around it.
-    for path in desired.iter().filter(|path| **path != kept_path) {
+    // The playing entry is now the only one left, at index 0. Append every other
+    // desired slot around it -- every slot except the one the kept entry will
+    // occupy, which is a position and not a path: filtering by path instead
+    // dropped every repeat of it, so a queue that legitimately holds the same
+    // file twice came back one entry short, and every later index the caller
+    // held was off by one.
+    for (index, path) in desired.iter().enumerate() {
+        if index == kept_target {
+            continue;
+        }
         ops.push(PlaylistOp::Append(path.clone()));
     }
 
@@ -144,6 +160,48 @@ mod tests {
         }
 
         queue
+    }
+
+    // Applies the ops the way mpv would while following the entry that was
+    // playing, so a test can assert where playback ends up and not only what the
+    // queue holds. With repeated paths the queue alone cannot tell you: every
+    // slot looks the same.
+    fn apply_tracking_current(
+        current: &[String],
+        ops: &[PlaylistOp],
+        current_index: i64,
+    ) -> (Vec<String>, i64) {
+        let mut queue = current.to_vec();
+        let mut is_current: Vec<bool> = (0..current.len())
+            .map(|index| index as i64 == current_index)
+            .collect();
+
+        for op in ops {
+            match op {
+                PlaylistOp::Remove(index) => {
+                    queue.remove(*index as usize);
+                    is_current.remove(*index as usize);
+                }
+                PlaylistOp::Append(path) => {
+                    queue.push(path.clone());
+                    is_current.push(false);
+                }
+                PlaylistOp::Move { from, to } => {
+                    let entry = queue.remove(*from as usize);
+                    let marked = is_current.remove(*from as usize);
+                    let target = if *to > *from { *to - 1 } else { *to };
+                    queue.insert(target as usize, entry);
+                    is_current.insert(target as usize, marked);
+                }
+            }
+        }
+
+        let position = is_current
+            .iter()
+            .position(|marked| *marked)
+            .map(|index| index as i64)
+            .unwrap_or(-1);
+        (queue, position)
     }
 
     #[test]
@@ -257,5 +315,47 @@ mod tests {
             reconcile_playlist(&current, Some(2), &desired),
             Ok(Vec::new())
         );
+    }
+
+    #[test]
+    fn a_repeated_path_is_materialized_rather_than_dropped() {
+        let current = paths(&["a"]);
+        let desired = paths(&["a", "a"]);
+
+        let ops = reconcile_playlist(&current, Some(0), &desired).expect("reconcile");
+        let (queue, playing) = apply_tracking_current(&current, &ops, 0);
+
+        assert_eq!(queue, desired);
+        assert_eq!(playing, 0);
+    }
+
+    #[test]
+    fn a_queue_that_repeats_the_playing_file_keeps_every_slot() {
+        let current = paths(&["a", "b"]);
+        let desired = paths(&["a", "b", "b"]);
+
+        let ops = reconcile_playlist(&current, Some(1), &desired).expect("reconcile");
+        let (queue, playing) = apply_tracking_current(&current, &ops, 1);
+
+        // A queue one entry short is not a cosmetic loss: every index after the
+        // dropped slot shifts, so a jump the caller makes by index lands on the
+        // wrong file or is rejected outright.
+        assert_eq!(queue, desired);
+        assert_eq!(playing, 1);
+    }
+
+    #[test]
+    fn the_playing_entry_keeps_its_slot_among_repeats() {
+        let current = paths(&["a", "b", "a"]);
+        let desired = paths(&["a", "c", "a"]);
+
+        let ops = reconcile_playlist(&current, Some(2), &desired).expect("reconcile");
+        let (queue, playing) = apply_tracking_current(&current, &ops, 2);
+
+        assert_eq!(queue, desired);
+        // Both slots hold the same path, so either would rebuild the right
+        // queue; playback has to stay in the slot it was already in, or the row
+        // the UI highlights jumps for no reason the user can see.
+        assert_eq!(playing, 2);
     }
 }
