@@ -307,10 +307,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 ninja-build nasm pkg-config
+          sudo apt-get install -y mingw-w64 ninja-build nasm pkg-config cmake
           pipx install meson
           x86_64-w64-mingw32-gcc --version | head -1
           meson --version
+          cmake --version | head -1
 
       - name: Setup pnpm (from packageManager field)
         uses: pnpm/action-setup@v4

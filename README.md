@@ -43,7 +43,7 @@ position/cache/dropped-frame churn is coalesced to at most one notification per
 - Node.js ≥ 18.17 (N-API 9), Electron built on a matching Node-API version
 - A Rust toolchain (stable) — the addon is built from source
 - A dynamically linked, LGPL-compatible libmpv runtime (see below)
-- Cross-building the Windows runtime: MinGW-w64, meson, ninja, nasm
+- Cross-building the Windows runtime: MinGW-w64, meson, ninja, nasm, cmake
 - Linux: X11 or Xwayland. **Native Wayland is not supported** — empv fails loudly
   when `DISPLAY` is unset.
 
@@ -72,7 +72,9 @@ mpv 0.41 with MinGW-w64 under `-Dgpl=false` and links every dependency into a
 single `libmpv-2.dll` that imports nothing but Windows itself. mpv only gates
 `cdda`, `dvbin`, `dvdnav`, `jack`, `oss-audio`, `caca`, `direct3d` and `x11`
 behind GPL, and none of those is something a player on Windows needs —
-`win32-desktop`, which is where `--wid` lives, is not gated.
+`win32-desktop`, which is where `--wid` lives, is not gated, and neither is the
+D3D11 renderer `vo=gpu` runs through — that one is gated behind `shaderc` and
+`spirv-cross`, which are cross-compiled alongside everything else.
 
 Linux has no prebuilt. It would also be addon-only, since distributions package
 libmpv and the addon links it by soname, but the resolver still looks for the
@@ -258,11 +260,6 @@ Know these before adopting:
   `--wid` is implemented. An LGPL Linux runtime would be Wayland-only, so Wayland
   support and an LGPL-clean Linux are the same piece of work.
 - **No native Wayland**, and no verified `linux-arm64` / `win32-arm64` builds.
-- **No D3D11 on Windows.** mpv gates its D3D11 renderer behind `shaderc` and
-  `spirv-cross`, which would mean cross-building glslang and SPIRV-Tools as
-  well, so `vo=gpu` renders through WGL. Hardware decoding is not lost with it:
-  `gl-dxinterop` is enabled, so DXVA2 frames still reach an OpenGL texture
-  without a copy through system memory.
 
 ## Architecture notes
 

@@ -53,6 +53,22 @@ The pinned build (see `scripts/embedded-mpv/runtime-pins.mjs` and the
 | HarfBuzz     | 8.5.0   | MIT ("Old MIT")                                                       |
 | FreeType     | 2.13.3  | FreeType License or GPL-2.0-or-later                                  |
 
+The Windows runtime additionally contains the two shader translators mpv's D3D11
+renderer is gated behind, and the sources they are built from. None is copyleft:
+
+| Component     | Version              | License                             |
+| ------------- | -------------------- | ----------------------------------- |
+| shaderc       | 2026.3               | Apache-2.0                          |
+| glslang       | pinned by shaderc    | BSD-3-Clause AND Apache-2.0 AND MIT |
+| SPIRV-Tools   | pinned by shaderc    | Apache-2.0                          |
+| SPIRV-Headers | pinned by shaderc    | MIT                                 |
+| SPIRV-Cross   | vulkan-sdk-1.4.350.1 | Apache-2.0                          |
+
+glslang, SPIRV-Tools and SPIRV-Headers are not separate libraries in the result:
+`shaderc_combined` is one static archive that already contains them. Their exact
+revisions are the ones shaderc pins in its own `DEPS` file, quoted in
+`build-windows-runtime.mjs` and recorded per build in the manifest.
+
 Exact source URLs and SHA-256 checksums for the archives are recorded per build
 in `runtime-manifest.json` under `packages.<name>.sourceUrl` /
 `.sourceSha256`, alongside the applied patches and the full mpv Meson flags and

@@ -43,7 +43,7 @@ export const windowsMpvDevPackage = {
 // a patch. Keep in sync with scripts/embedded-mpv/patches/.
 export const mpvPatchesByPlatform = {
   darwin: ['mpv-videotoolbox-gl-without-cocoa.patch'],
-  win32: []
+  win32: ['mpv-shaderc-spirv-cross-static-pkgconfig.patch']
 }
 
 // Every patch, for the dry-run gate: whether a patch still applies to the

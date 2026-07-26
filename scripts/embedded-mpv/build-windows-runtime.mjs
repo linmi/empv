@@ -13,7 +13,8 @@
 // meson.build for the pinned 0.41.0, the features gated behind -Dgpl=true are
 // cdda, dvbin, dvdnav, jack, oss-audio, caca, direct3d and x11. Of those only
 // direct3d -- the legacy D3D9 output -- exists on Windows and matters to a
-// player, and empv drives vo=gpu over WGL. win32-desktop is not gated, so
+// player, and it is not the D3D11 renderer empv drives vo=gpu through, which is
+// a separate ungated feature. win32-desktop is not gated either, so
 // video/out/w32_common.c, which is where --wid is implemented, is in an LGPL
 // build. Linux is the opposite case: x11 is gated, so there --wid and LGPL are
 // mutually exclusive.
@@ -28,7 +29,8 @@
 // subtleties. Linking every dependency into libmpv-2.dll removes the question:
 // one file, imports nothing but Windows itself, and the addon still links it
 // dynamically -- which is the arrangement LGPL asks for. Everything inside is
-// LGPL, MIT, ISC or the FreeType licence, so the combined DLL is LGPL and the
+// LGPL, Apache-2.0, MIT, BSD-3-Clause, ISC or the FreeType licence, none of them
+// copyleft beyond the LGPL, so the combined DLL is LGPL-2.1-or-later and the
 // manifest names every source archive it was built from.
 import fs from 'fs'
 import os from 'os'
@@ -98,6 +100,49 @@ const sourcePackages = [
     gitUrl: 'https://github.com/haasn/libplacebo.git',
     license: 'LGPL-2.1-or-later'
   },
+  // The three below exist only to give mpv its D3D11 renderer, which it gates
+  // behind shaderc (GLSL to SPIR-V) and SPIRV-Cross (SPIR-V to HLSL). Without
+  // them vo=gpu falls back to WGL, which works but leaves rendering at the mercy
+  // of whatever OpenGL the display driver provides.
+  //
+  // glslang and SPIRV-Tools are not listed separately: shaderc_combined is one
+  // archive that already contains them, so they are inputs to shaderc's build
+  // rather than libraries of their own. Their revisions are the ones shaderc
+  // pins in its own DEPS file, quoted here so a shaderc bump is a deliberate
+  // three-line change rather than a silent drift in what got compiled.
+  {
+    id: 'spirv-headers',
+    version: '29981f65241605e08b0ede4cfeb999fe3b723c6a',
+    url: 'https://github.com/KhronosGroup/SPIRV-Headers/archive/29981f65241605e08b0ede4cfeb999fe3b723c6a.tar.gz',
+    license: 'MIT',
+    pinnedBy: 'shaderc v2026.3 DEPS: spirv_headers_revision'
+  },
+  {
+    id: 'spirv-tools',
+    version: 'b707790a898e44038547df54580022fc1cf89c3d',
+    url: 'https://github.com/KhronosGroup/SPIRV-Tools/archive/b707790a898e44038547df54580022fc1cf89c3d.tar.gz',
+    license: 'Apache-2.0',
+    pinnedBy: 'shaderc v2026.3 DEPS: spirv_tools_revision'
+  },
+  {
+    id: 'glslang',
+    version: '168d452a4f460d24b588fed08477a81c44ee27a1',
+    url: 'https://github.com/KhronosGroup/glslang/archive/168d452a4f460d24b588fed08477a81c44ee27a1.tar.gz',
+    license: 'BSD-3-Clause AND Apache-2.0 AND MIT',
+    pinnedBy: 'shaderc v2026.3 DEPS: glslang_revision'
+  },
+  {
+    id: 'shaderc',
+    version: '2026.3',
+    url: 'https://github.com/google/shaderc/archive/refs/tags/v2026.3.tar.gz',
+    license: 'Apache-2.0'
+  },
+  {
+    id: 'spirv-cross',
+    version: 'vulkan-sdk-1.4.350.1',
+    url: 'https://github.com/KhronosGroup/SPIRV-Cross/archive/refs/tags/vulkan-sdk-1.4.350.1.tar.gz',
+    license: 'Apache-2.0'
+  },
   mpvSource
 ]
 
@@ -120,6 +165,7 @@ const buildRoot = runtimeBuildRoot(`win32-${arch}`)
 const archiveRoot = path.join(buildRoot, 'archives')
 const sourceRoot = path.join(buildRoot, 'sources')
 const crossFilePath = path.join(buildRoot, 'meson-cross-mingw.ini')
+const cmakeToolchainPath = path.join(buildRoot, 'cmake-toolchain-mingw.cmake')
 const packageById = new Map(sourcePackages.map((source) => [source.id, source]))
 const parallelism = process.env.MAKEFLAGS?.match(/-j\s*(\d+)/)?.[1] ?? String(os.cpus().length)
 
@@ -186,14 +232,13 @@ const mpvMesonFlags = [
   '-Duchardet=disabled',
   '-Dzimg=disabled',
   '-Dvulkan=disabled',
-  '-Dshaderc=disabled',
-  // mpv gates its d3d11 gpu-context behind shaderc AND spirv-cross, which it
-  // needs to translate GLSL to HLSL at runtime; cross-building those pulls in
-  // glslang, SPIRV-Tools and SPIRV-Headers as well. vo=gpu therefore renders
-  // through WGL here, which is not the downgrade it sounds like: gl-dxinterop
-  // is enabled, so DXVA2 hardware decoding still lands in an OpenGL texture
-  // without a copy through system memory.
-  '-Dspirv-cross=disabled'
+  // The D3D11 renderer, and the two translators mpv needs to feed it: GLSL to
+  // SPIR-V through shaderc, SPIR-V to HLSL through SPIRV-Cross. All three
+  // enabled rather than auto, so a dependency that fails to build fails the
+  // build instead of producing a libmpv that silently renders through WGL.
+  '-Dshaderc=enabled',
+  '-Dspirv-cross=enabled',
+  '-Dd3d11=enabled'
 ]
 
 // What the Windows runtime has to come out with. Every one of these is
@@ -214,7 +259,14 @@ const REQUIRED_MPV_FEATURES = [
   'libass',
   'libplacebo',
   // Proves -static did not quietly leave a libwinpthread dependency behind.
-  'win32-threads'
+  'win32-threads',
+  // The D3D11 renderer and the two shader translators it is gated behind. mpv
+  // disables d3d11 silently when either is missing, leaving a libmpv whose
+  // vo=gpu quietly falls back to WGL -- the exact regression this list exists to
+  // catch, since nothing about playback looks different until you profile it.
+  'shaderc',
+  'spirv-cross',
+  'd3d11'
 ]
 
 function buildEnv() {
@@ -246,6 +298,53 @@ function buildEnv() {
       .filter(Boolean)
       .join(' ')
   }
+}
+
+// CMake has no equivalent of meson's --cross-file on the command line, so the
+// toolchain is written out the same way. Deliberately no CMAKE_FIND_ROOT_PATH:
+// the sysroot lives somewhere different under Homebrew than under Ubuntu, and
+// pinning it would make this work on exactly one of them. CMAKE_PREFIX_PATH is
+// enough -- the only non-toolchain libraries these projects look for are the
+// ones already installed into our own prefix.
+function writeCmakeToolchainFile() {
+  const contents = `set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(CMAKE_C_COMPILER ${TRIPLE}-gcc)
+set(CMAKE_CXX_COMPILER ${TRIPLE}-g++)
+set(CMAKE_RC_COMPILER ${TRIPLE}-windres)
+set(CMAKE_PREFIX_PATH ${prefix})
+`
+  fs.writeFileSync(cmakeToolchainPath, contents)
+  log(`Wrote cmake toolchain file at ${cmakeToolchainPath}`)
+}
+
+function cmakeInstall(packageId, cmakeArgs) {
+  const packageSourcePath = sourcePathFor(packageId)
+  const buildDir = path.join(packageSourcePath, 'build-empv')
+  const env = buildEnv()
+  fs.rmSync(buildDir, { recursive: true, force: true })
+
+  run(
+    'cmake',
+    [
+      '-S',
+      packageSourcePath,
+      '-B',
+      buildDir,
+      `-DCMAKE_TOOLCHAIN_FILE=${cmakeToolchainPath}`,
+      `-DCMAKE_INSTALL_PREFIX=${prefix}`,
+      '-DCMAKE_INSTALL_LIBDIR=lib',
+      '-DCMAKE_BUILD_TYPE=Release',
+      '-DBUILD_SHARED_LIBS=OFF',
+      ...cmakeArgs
+    ],
+    { cwd: packageSourcePath, env }
+  )
+  run('cmake', ['--build', buildDir, '--parallel', parallelism], {
+    cwd: packageSourcePath,
+    env
+  })
+  run('cmake', ['--install', buildDir], { cwd: packageSourcePath, env })
 }
 
 function writeCrossFile() {
@@ -346,10 +445,50 @@ function mesonInstallMpv(mesonArgs) {
   run('meson', ['install', '-C', buildDir], { cwd: packageSourcePath, env })
 }
 
+// SPIRV-Cross's static pkg-config file names only the top archive, and the C API
+// in it needs seven siblings: linking what the file says produces "undefined
+// reference to vtable for spirv_cross::Compiler" out of an archive that is
+// sitting right there in the same directory.
+//
+// This corrects incomplete metadata rather than inventing any: every library
+// added below is one that spirv-cross-c genuinely requires and that the same
+// install step already produced. The original line is matched exactly so an
+// upstream fix surfaces here as a failure instead of being silently overwritten
+// with our version of it.
+function completeSpirvCrossPkgConfig() {
+  const pkgConfigPath = path.join(prefix, 'lib', 'pkgconfig', 'spirv-cross-c.pc')
+  const contents = fs.readFileSync(pkgConfigPath, 'utf8')
+  const incomplete = 'Libs: -L${libdir} -lspirv-cross-c\n'
+
+  if (!contents.includes(incomplete)) {
+    throw new Error(
+      `${pkgConfigPath} no longer has the incomplete Libs line this build corrects. ` +
+        'Check whether SPIRV-Cross now lists the static closure itself, and drop this step if so.'
+    )
+  }
+
+  // Dependents before dependencies: the archives are not in a link group here,
+  // and spirv-cross-core has to come last because everything else needs it.
+  const closure = [
+    '-lspirv-cross-c',
+    '-lspirv-cross-glsl',
+    '-lspirv-cross-hlsl',
+    '-lspirv-cross-msl',
+    '-lspirv-cross-cpp',
+    '-lspirv-cross-reflect',
+    '-lspirv-cross-util',
+    '-lspirv-cross-core'
+  ].join(' ')
+
+  fs.writeFileSync(pkgConfigPath, contents.replace(incomplete, `Libs: -L\${libdir} ${closure}\n`))
+  log('Completed spirv-cross-c.pc with the static archives its C API requires')
+}
+
 function buildRuntime() {
   fs.rmSync(prefix, { recursive: true, force: true })
   fs.mkdirSync(prefix, { recursive: true })
   writeCrossFile()
+  writeCmakeToolchainFile()
 
   configureMakeInstall('freetype', ['--disable-shared', '--enable-static'])
   configureMakeInstall('fribidi', ['--disable-shared', '--enable-static'])
@@ -407,6 +546,33 @@ function buildRuntime() {
     ],
     { defaultLibrary: 'static' }
   )
+  // shaderc's own build subsumes glslang and SPIRV-Tools rather than linking
+  // installed copies, so they are pointed at in place: SHADERC_*_DIR is exactly
+  // what those cache variables are for, and it avoids shuffling three source
+  // trees into third_party/ just to satisfy a default path.
+  //
+  // Tests are skipped, which is not only about build time: SPIRV_SKIP_TESTS is
+  // what makes abseil, re2, effcee and googletest unnecessary, so skipping them
+  // is the difference between three pinned sources and seven.
+  cmakeInstall('shaderc', [
+    `-DSHADERC_SPIRV_HEADERS_DIR=${sourcePathFor('spirv-headers')}`,
+    `-DSHADERC_SPIRV_TOOLS_DIR=${sourcePathFor('spirv-tools')}`,
+    `-DSHADERC_GLSLANG_DIR=${sourcePathFor('glslang')}`,
+    '-DSHADERC_SKIP_TESTS=ON',
+    '-DSHADERC_SKIP_EXAMPLES=ON',
+    '-DSHADERC_SKIP_EXECUTABLES=ON',
+    '-DSHADERC_SKIP_COPYRIGHT_CHECK=ON',
+    '-DSHADERC_ENABLE_SHARED_CRT=OFF'
+  ])
+  // Static only. The shared variant would be a second DLL to ship, and the C++
+  // API and CLI are of no use to mpv, which calls the C one.
+  cmakeInstall('spirv-cross', [
+    '-DSPIRV_CROSS_STATIC=ON',
+    '-DSPIRV_CROSS_SHARED=OFF',
+    '-DSPIRV_CROSS_CLI=OFF',
+    '-DSPIRV_CROSS_ENABLE_TESTS=OFF'
+  ])
+  completeSpirvCrossPkgConfig()
   mesonInstallMpv(mpvMesonFlags)
 }
 
@@ -436,6 +602,9 @@ const BUILT_HERE = [
   'postproc',
   'placebo',
   'ass',
+  'shaderc',
+  'shaderc_shared',
+  'spirv-cross-c-shared',
   'freetype',
   'fribidi',
   'harfbuzz'
@@ -517,6 +686,7 @@ try {
     'git',
     'patch',
     'nasm',
+    'cmake',
     `${TRIPLE}-gcc`,
     `${TRIPLE}-objdump`
   ])

@@ -1,0 +1,52 @@
+Look up shaderc and SPIRV-Cross by the names their static builds publish.
+
+mpv's D3D11 renderer needs shaderc (GLSL to SPIR-V) and SPIRV-Cross (SPIR-V to
+HLSL), and it looks for them as pkg-config `shaderc` and `spirv-cross-c-shared`.
+Both of those names describe the shared-library variants:
+
+  shaderc installs shaderc.pc (-lshaderc_shared), shaderc_static.pc and
+  shaderc_combined.pc (-lshaderc_combined, one archive that already contains
+  glslang and SPIRV-Tools).
+
+  SPIRV-Cross installs spirv-cross-c.pc under SPIRV_CROSS_STATIC and
+  spirv-cross-c-shared.pc under SPIRV_CROSS_SHARED. They are separate options
+  and the static one does not publish the shared name.
+
+The empv Windows runtime is a single self-contained libmpv-2.dll: everything is
+linked in so the DLL imports nothing but Windows itself, which is what makes it
+loadable from wherever the addon happens to be installed. Building the shared
+variants instead would add two DLLs that would have to travel alongside it.
+
+So this changes which pkg-config names mpv asks for, and nothing else. The
+alternative was to install our own shaderc.pc and spirv-cross-c-shared.pc
+pointing at the static archives, which would leave the build prefix asserting
+that shared libraries exist when they do not -- a lie told to every other
+consumer of that prefix in order to avoid editing two lines here.
+
+Removal condition: drop this patch if mpv ever accepts the static pkg-config
+names on its own (upstream `dependency(['shaderc', 'shaderc_combined'])` or
+equivalent), or if the empv Windows runtime stops linking statically.
+
+Applies to: mpv 0.41.0. Applied for the win32 build only -- these dependencies
+exist solely for the D3D11 renderer, which mpv gates behind win32-desktop.
+
+--- a/meson.build
++++ b/meson.build
+@@ -995,7 +995,7 @@
+     dependencies += sdl2
+ endif
+
+-shaderc = dependency('shaderc', required:
++shaderc = dependency('shaderc_combined', required:
+     get_option('shaderc').require(features['win32-desktop']))
+ features += {'shaderc': shaderc.found()}
+ if features['shaderc']
+@@ -1015,7 +1015,7 @@
+     features += {'posix-shm': cc.has_function('shm_open', prefix: '#include <sys/mman.h>')}
+ endif
+
+-spirv_cross = dependency('spirv-cross-c-shared', required:
++spirv_cross = dependency('spirv-cross-c', required:
+     get_option('spirv-cross').require(features['win32-desktop']))
+ features += {'spirv-cross': spirv_cross.found()}
+ if features['spirv-cross']
