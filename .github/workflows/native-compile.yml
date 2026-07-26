@@ -364,20 +364,19 @@ jobs:
           node-version: 22
 
       # libmpv-dev 带入运行时 libmpv.so.2（与 linux 编译端同源）；xvfb 提供 X 显示；
-      # ffmpeg 生成 fixture。
+      # ffmpeg 生成 fixture；libgl1-mesa-dri 提供软件 GL。libx11-6 / libxext6 已随
+      # 基础镜像与 libmpv 依赖带入，无需显式安装。
       #
-      # GL 需要三样，缺一不可：libgl1-mesa-dri 是 DRI 驱动（llvmpipe 在这里），
-      # libglx-mesa0 是 GLX 的 Mesa vendor，libegl-mesa0 是 EGL 的。mpv 的 vo=gpu
-      # 依次尝试 x11egl 与 x11(GLX)，两条都起不来才会掉到 drm —— 而 runner 上没有
-      # DRM 设备，于是报 "No primary DRM device could be picked!" 并判定
-      # "Failed initializing any suitable GPU context!"。只装 DRI 驱动不够。
-      # libgbm1 是 Mesa EGL 在无显示设备下的缓冲管理依赖。
+      # 这里装再多 Mesa 包也修不好本 job 当前的失败，别再往上加：GLX 其实起来了
+      # （mpv 打印 "Suspected software renderer or indirect context." 说明它已经
+      # 拿到 renderer 并识别出是软件光栅），是 mpv 在自动探测时**主动拒绝**软件
+      # 渲染器，才继续去试 drm 并在无 DRM 设备的 runner 上彻底失败。开关是 mpv 的
+      # gpu-sw 选项，而会话选项由 native 侧设定，不是 CI 能左右的。
       - name: Install runtime libmpv + Xvfb + ffmpeg + software GL
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libmpv-dev xvfb ffmpeg \
-            libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libgbm1
+            libmpv-dev xvfb ffmpeg libgl1-mesa-dri
 
       # 把 linux job 编好的 .node 落回稳定的 native 输出路径；冒烟脚本用 createRequire
       # 按相对该路径（../../native/build/Release/empv.node）加载。
