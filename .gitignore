@@ -8,6 +8,7 @@ node_modules/
 native/build/
 native/target/
 dist/
+platform-packages/
 
 # Staged runtime: a release input, not source.
 vendor/embedded-mpv/*/include/

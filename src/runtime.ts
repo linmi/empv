@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -287,6 +288,22 @@ function getPackageRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), '..')
 }
 
+// The prebuilt package for this platform, if one was installed. npm resolves
+// optionalDependencies by the `os`/`cpu` fields, so at most one of them is ever
+// present and it always matches the host. Its layout is a staged runtime
+// directory: the addon at the root, the libmpv runtime under lib/ on platforms
+// that carry one, and the manifest beside them.
+function getPlatformPackageCandidates(platformKey: string): string[] {
+  try {
+    const resolveFromHere = createRequire(import.meta.url)
+    return [dirname(resolveFromHere.resolve(`empv-${platformKey}/package.json`))]
+  } catch {
+    // Not installed. That is the normal case in this repository and on any
+    // platform with no published prebuilt; the candidates above still apply.
+    return []
+  }
+}
+
 function getPackageBuildOutputCandidates(): string[] {
   const packageRoot = getPackageRoot()
 
@@ -324,9 +341,12 @@ function getRuntimeDirectoryCandidates(
     ]),
     // This package's own build output, resolved from the module rather than from
     // the caller's layout: `build:native` writes here whether the package sits in
-    // a workspace or under a consumer's node_modules. Last, so a bundled release
-    // runtime always wins over a locally built one.
-    ...getPackageBuildOutputCandidates()
+    // a workspace or under a consumer's node_modules. Below a bundled release
+    // runtime, above the prebuilt: someone who ran `build:native` meant it, and
+    // a stale prebuilt silently winning over a fresh local build is the worse
+    // surprise of the two.
+    ...getPackageBuildOutputCandidates(),
+    ...getPlatformPackageCandidates(platformKey)
   ])
 }
 

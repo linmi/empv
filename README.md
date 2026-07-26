@@ -20,7 +20,7 @@ selected at load time by `getPresentationKind()`:
 
 |             | macOS                                                                   | Windows / Linux                         |
 | ----------- | ----------------------------------------------------------------------- | --------------------------------------- |
-| kind        | `layer`                                                        | `window`                            |
+| kind        | `layer`                                                                 | `window`                                |
 | video out   | `vo=libmpv`, rendered by a Rust worker into a three-slot IOSurface pool | `vo=gpu` into an app-owned child window |
 | transport   | mach frame link → main-process `CALayer` presenter                      | main process reparents the child window |
 | compositing | under **or** over the web contents (`zOrder`)                           | above the web contents                  |
@@ -52,9 +52,13 @@ position/cache/dropped-frame churn is coalesced to at most one notification per
 npm install empv
 ```
 
-The npm package contains the TypeScript API, the Rust sources and the runtime
-tooling. It does **not** contain prebuilt binaries: you build the addon and
-supply a runtime.
+On macOS the addon and the libmpv runtime it loads arrive as a prebuilt
+`empv-darwin-arm64` package, pulled in automatically as an optional dependency:
+nothing to build, no Rust toolchain, no runtime to stage.
+
+> Prebuilt packages are produced and verified in CI but are **not on npm yet**,
+> so today every platform still builds from source. The rest of this section is
+> what that takes.
 
 ```bash
 # 1. Build (or stage) an LGPL-compatible libmpv runtime for your platform.
@@ -65,6 +69,16 @@ npm run stage-runtime -- darwin arm64 /tmp/empv-prefix
 # 2. Build the native addon against it.
 npm run build:native
 ```
+
+Windows gets a prebuilt too, but an addon-only one: every libmpv build available
+for Windows is GPL, so bundling one would relicense whatever ships it. Put a
+`libmpv-2.dll` beside the installed `empv.node` and Windows finds it — the
+loading module's own directory is searched first.
+
+Linux has no prebuilt yet. It would also be addon-only, since distributions
+package libmpv and the addon links it by soname, but the resolver still looks for
+the library inside the runtime directory and on Linux it lives in `/usr/lib`.
+That needs system-path discovery first.
 
 ## Runtime
 
@@ -219,9 +233,13 @@ Know these before adopting:
 - **Electron-shaped.** The presenter API takes an Electron native window handle
   (`BrowserWindow.getNativeWindowHandle()`). The session API alone runs in plain
   Node, but there is no presentation path outside Electron.
-- **No prebuilt binaries.** Every consumer compiles the addon and supplies a
-  runtime. `napi.targets` lists six triples but only host-native builds are
-  wired up today.
+- **Prebuilts are not published yet.** The packaging works and is verified on
+  every push -- pack, install into a project outside the repository, dlopen, play
+  -- but nothing is on npm, so every platform builds from source today.
+- **Linux has no prebuilt**, and on Linux there is no LGPL libmpv to build
+  against either: mpv gates X11 behind `-Dgpl=true`, and `x11_common.c` is where
+  `--wid` is implemented. An LGPL Linux runtime would be Wayland-only, so Wayland
+  support and an LGPL-clean Linux are the same piece of work.
 - **No native Wayland**, and no verified `linux-arm64` / `win32-arm64` builds.
 - **macOS x64** has a build path but no CI coverage.
 

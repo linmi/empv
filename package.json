@@ -41,6 +41,11 @@
     },
     "./package.json": "./package.json"
   },
+  "optionalDependencies": {
+    "empv-darwin-arm64": "0.1.0",
+    "empv-darwin-x64": "0.1.0",
+    "empv-win32-x64": "0.1.0"
+  },
   "peerDependencies": {
     "electron": ">=42"
   },
@@ -85,6 +90,8 @@
   "scripts": {
     "build": "pnpm run verify:node-esm-imports && tsc -p tsconfig.json",
     "build:native": "node scripts/build-native.cjs",
+    "pack:platform": "node scripts/pack-platform-package.mjs",
+    "verify:prebuilt": "node scripts/verify-prebuilt.mjs",
     "build-runtime:macos": "node scripts/embedded-mpv/build-macos-runtime.mjs",
     "prepare-runtime:windows": "node scripts/embedded-mpv/prepare-windows-runtime.mjs",
     "stage-runtime": "node scripts/embedded-mpv/stage-runtime.mjs",

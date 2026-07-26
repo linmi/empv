@@ -17,9 +17,14 @@ export const mpvSource = {
 }
 
 // Windows CI and the interactive hardware gate compile against this exact
-// upstream development archive. It is compile/test input only: the archive is
-// not promoted to the packaged vendored runtime because its upstream build
-// configuration is outside our LGPL release pipeline.
+// upstream development archive. It is compile/test input only, and the reason is
+// concrete rather than cautious: the DLL is a GPL build. Its embedded mpv
+// configuration carries no -Dgpl=false (mpv defaults to true) and enables
+// libbluray, dvdnav and vapoursynth, and the binary exports libx264/libx265
+// symbols, so its FFmpeg was configured --enable-gpl. Redistributing it inside
+// an Apache-2.0 package would put that whole distribution under the GPL.
+// Shipping a Windows prebuilt therefore waits on an LGPL runtime built from
+// pinned sources, the way build-macos-runtime.mjs does for macOS.
 export const windowsMpvDevPackage = {
   version: '20260718-git-94335ab87a',
   url: 'https://github.com/zhongfly/mpv-winbuild/releases/download/2026-07-18-94335ab87a/mpv-dev-x86_64-20260718-git-94335ab87a.7z',

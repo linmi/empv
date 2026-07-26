@@ -253,6 +253,22 @@ jobs:
           pnpm exec napi build --release --target x86_64-pc-windows-msvc --cwd $native --manifest-path $manifest --package-json-path $packageJson --output-dir $output
           if ($LASTEXITCODE -ne 0) { throw "napi build exited $LASTEXITCODE" }
 
+      # 产出可分发的 Windows 预编译包。它只带 addon：Windows 上能拿到的 libmpv
+      # 构建都是 GPL，捆绑会让分发方被传染，而使用者把 libmpv-2.dll 放到 addon
+      # 同目录即可——Windows 优先在加载模块自身目录里找 DLL。
+      - name: Pack the Windows platform package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm run pack:platform -- win32 x64 --from native/build/Release
+          if ($LASTEXITCODE -ne 0) { throw "pack:platform exited $LASTEXITCODE" }
+
+      - name: Upload the Windows platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: empv-win32-x64
+          path: platform-packages/empv-win32-x64
+          if-no-files-found: error
+
       - name: Assert empv.node was produced
         run: |
           $ErrorActionPreference = 'Stop'
@@ -352,6 +368,13 @@ jobs:
             exit 1
           fi
           echo "produced $node_file"
+
+      # 预编译分发链路：打平台包 -> 装进仓库外的空工程 -> 在那里 dlopen 并开会话。
+      # 这里的 runtime 是 Homebrew 而非 vendored LGPL，产物不可发布，所以显式带上
+      # --allow-non-release-runtime；它验的是机制（files 清单、dylib 名字闭包、
+      # 解析器能否找到已安装的平台包），发布合规由 release 流程单独保证。
+      - name: Verify the prebuilt distribution mechanism
+        run: pnpm run verify:prebuilt -- --allow-non-release-runtime
 
       # 真加载 .node、建 IOSurface 池、起 mach 帧链、驱动播放并回读 RGBA。
       # 不建 presenter/窗口，所以无需登录桌面：CGL 离屏 + IOSurface + mach bootstrap
