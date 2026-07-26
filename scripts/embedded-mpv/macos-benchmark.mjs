@@ -61,13 +61,20 @@ const SEEK_TARGET_EARLY_SECONDS = 1.5
 const SEEK_TARGET_LATE_SECONDS = 17.5
 const SEEK_TOLERANCE_SECONDS = 0.35
 
+// Software encoders, deliberately. What is measured is decoding, and how the
+// fixture was produced does not enter into that -- but a hardware encoder does
+// not exist everywhere this runs. h264_videotoolbox fails outright on the Intel
+// CI runner, which is a VM with no VideoToolbox encode support, and took a
+// release build down with "Invalid argument" from a step that has nothing to do
+// with what it is testing. Software encoding also makes the input identical on
+// every machine, which a benchmark wants anyway.
 const CASES = [
   {
     id: '1080p60-h264',
     width: 1920,
     height: 1080,
     fps: 60,
-    encoder: 'h264_videotoolbox',
+    encoder: 'libx264',
     // High enough that decode is doing real work on synthetic content, which
     // otherwise compresses to almost nothing and measures the demuxer.
     bitrate: '20M'
@@ -77,7 +84,7 @@ const CASES = [
     width: 3840,
     height: 2160,
     fps: 30,
-    encoder: 'hevc_videotoolbox',
+    encoder: 'libx265',
     bitrate: '60M'
   }
 ]
