@@ -32,6 +32,17 @@ pub fn initialize_handle(
         ("gapless-audio", "yes"),
         ("prefetch-playlist", "yes"),
         ("vo", "gpu"),
+        // Play on a software rasteriser rather than refusing to play at all.
+        // While auto-probing, mpv discards a GPU context it recognises as
+        // software ("Suspected software renderer or indirect context") and moves
+        // on to the next one; with no other context available -- a VM, a remote
+        // desktop, a broken driver, a CI runner with no DRM device -- it ends at
+        // "Failed initializing any suitable GPU context!" and the session dies
+        // with a black window and no video. mpv's own default is right for a
+        // desktop player, where the user should be told their acceleration is
+        // gone; it is wrong for an embedded one, where the honest outcome is
+        // slow video rather than no video.
+        ("gpu-sw", "yes"),
         ("hwdec", "auto-safe"),
     ] {
         handle.set_option_for_action(name, value, &format!("configure libmpv option {name}"))?;
