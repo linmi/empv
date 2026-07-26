@@ -1,6 +1,6 @@
 {
   "name": "empv",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "packageManager": "pnpm@11.7.0",
   "description": "Embedded libmpv player for Electron: a Rust/N-API addon with a typed session contract, IOSurface/mach compositing on macOS and native child-window embedding on Windows and Linux.",
   "keywords": [
@@ -42,9 +42,9 @@
     "./package.json": "./package.json"
   },
   "optionalDependencies": {
-    "empv-darwin-arm64": "0.1.0",
-    "empv-darwin-x64": "0.1.0",
-    "empv-win32-x64": "0.1.0"
+    "empv-darwin-arm64": "0.2.0",
+    "empv-darwin-x64": "0.2.0",
+    "empv-win32-x64": "0.2.0"
   },
   "peerDependencies": {
     "electron": ">=42"
