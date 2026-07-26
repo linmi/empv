@@ -21,7 +21,7 @@
 //     scripts/embedded-mpv/windows-smoke.mjs [fixture.mp4]
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -218,6 +218,12 @@ async function main() {
   verifyNativeBuild()
   const preparedFixture = prepareFixture()
   const fixture = preparedFixture.fixture
+  const queueDir = mkdtempSync(path.join(tmpdir(), 'empv-windows-smoke-queue-'))
+  const playlistCopies = [1, 2].map((index) => {
+    const copyPath = path.join(queueDir, `entry-${index + 1}.mp4`)
+    copyFileSync(fixture, copyPath)
+    return copyPath
+  })
   log(`fixture: ${fixture}`)
   log(`addon:   ${ADDON_PATH}`)
 
@@ -225,6 +231,7 @@ async function main() {
   try {
     normalized = normalizeEmbeddedAddon(require(ADDON_PATH))
   } catch (error) {
+    rmSync(queueDir, { recursive: true, force: true })
     preparedFixture.cleanup()
     fail(
       `Failed to load or normalize the embedded mpv addon from ${ADDON_PATH}: ` +
@@ -357,7 +364,10 @@ async function main() {
     )
     log(`replay restarted and advanced to ${restartedSnapshot.positionSeconds}s OK`)
 
-    addon.appendPlaylistEntry(sessionId, fixture, 'entry-2')
+    // The tail AFTER the session's own loaded source -- native prepends the path
+    // it actually handed mpv. Reconciliation is by media path, so the tail needs
+    // its own files rather than repeats of the fixture's path.
+    addon.playlistSync(sessionId, [{ mediaPath: playlistCopies[0], title: 'entry-2' }])
     await waitForSnapshot(
       addon,
       sessionId,
@@ -375,7 +385,10 @@ async function main() {
     )
     log("default auto-advance reached entry 2 with status 'playing' OK")
 
-    addon.appendPlaylistEntry(sessionId, fixture, 'entry-3')
+    addon.playlistSync(sessionId, [
+      { mediaPath: playlistCopies[0], title: 'entry-2' },
+      { mediaPath: playlistCopies[1], title: 'entry-3' }
+    ])
     await waitForSnapshot(
       addon,
       sessionId,
@@ -452,6 +465,7 @@ async function main() {
       cleanupErrors.push(`disposeSession(${description}) failed: ${errorText(error)}`)
     }
   }
+  rmSync(queueDir, { recursive: true, force: true })
   preparedFixture.cleanup()
 
   if (bodyError) {
