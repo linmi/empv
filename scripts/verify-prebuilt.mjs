@@ -31,8 +31,17 @@ function log(message) {
   console.log(`[verify-prebuilt] ${message}`)
 }
 
+// npm and pnpm are .cmd shims on Windows, and spawnSync will not execute those:
+// it reports ENOENT, which reads as "the tool is not installed" for a tool that
+// plainly is. Naming the shim is more precise than passing shell:true, which
+// would also change how every argument is quoted.
+function resolveCommand(command) {
+  if (process.platform !== 'win32') return command
+  return command === 'npm' || command === 'pnpm' ? `${command}.cmd` : command
+}
+
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const result = spawnSync(resolveCommand(command), args, {
     cwd: options.cwd ?? packageRoot,
     encoding: 'utf8',
     stdio: options.inherit ? 'inherit' : ['ignore', 'pipe', 'pipe']

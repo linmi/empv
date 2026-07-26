@@ -186,8 +186,11 @@ jobs:
           key: release-${{ matrix.arch }}
 
       # curl, tar, make, git and patch are on the image already; these are not.
+      # ffmpeg is not a build input: the benchmark encodes its own fixtures with
+      # it, and without it that step fails with an ENOENT that reads like a bug
+      # in the benchmark rather than a missing tool on the runner.
       - name: Install the runtime build tools
-        run: brew install meson ninja nasm pkg-config
+        run: brew install meson ninja nasm pkg-config ffmpeg
 
       - name: Setup pnpm (from packageManager field)
         uses: pnpm/action-setup@v4
