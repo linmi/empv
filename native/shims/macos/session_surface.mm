@@ -56,15 +56,34 @@ extern "C" EmpvMacSessionSurface* empv_mac_session_surface_create(
         return nullptr;
     }
 
-    const CGLPixelFormatAttribute attributes[] = {
+    // Prefer an accelerated renderer, but do not require one. kCGLPFAAccelerated
+    // makes hardware a hard constraint, and CGLChoosePixelFormat then fails with
+    // "invalid pixel format" wherever no accelerated renderer is available to the
+    // session -- a headless machine, a VM, a CI runner. Dropping the attribute on
+    // the second attempt does not force software rendering; it stops demanding
+    // hardware, so CGL picks the best renderer that exists. Slow video beats no
+    // video, the same trade the WID backend makes with mpv's gpu-sw.
+    const CGLPixelFormatAttribute accelerated_attributes[] = {
         kCGLPFAAccelerated,
         kCGLPFAOpenGLProfile,
         static_cast<CGLPixelFormatAttribute>(kCGLOGLPVersion_3_2_Core),
         static_cast<CGLPixelFormatAttribute>(0),
     };
+    const CGLPixelFormatAttribute any_renderer_attributes[] = {
+        kCGLPFAOpenGLProfile,
+        static_cast<CGLPixelFormatAttribute>(kCGLOGLPVersion_3_2_Core),
+        static_cast<CGLPixelFormatAttribute>(0),
+    };
     GLint virtual_screen_count = 0;
-    const CGLError choose_result =
-        CGLChoosePixelFormat(attributes, &surface->pixel_format, &virtual_screen_count);
+    CGLError choose_result =
+        CGLChoosePixelFormat(accelerated_attributes, &surface->pixel_format, &virtual_screen_count);
+    if (choose_result != kCGLNoError || !surface->pixel_format) {
+        choose_result = CGLChoosePixelFormat(
+            any_renderer_attributes,
+            &surface->pixel_format,
+            &virtual_screen_count
+        );
+    }
     if (choose_result != kCGLNoError || !surface->pixel_format) {
         empv_mac_write_error(
             error_message,
