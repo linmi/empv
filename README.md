@@ -57,8 +57,8 @@ alongside the main one:
 ```bash
 # macOS, Apple Silicon — addon and libmpv runtime, nothing to build
 npm install \
-  https://github.com/linmi/empv/releases/download/v0.2.0/empv-0.2.0.tgz \
-  https://github.com/linmi/empv/releases/download/v0.2.0/empv-darwin-arm64-0.2.0.tgz
+  https://github.com/linmi/empv/releases/download/v0.3.0/empv-0.3.0.tgz \
+  https://github.com/linmi/empv/releases/download/v0.3.0/empv-darwin-arm64-0.3.0.tgz
 ```
 
 `empv-darwin-x64` and `empv-win32-x64` are attached to the same release. No Rust
