@@ -23,12 +23,10 @@ pub fn initialize_handle(
     for (name, value) in [
         ("terminal", "no"),
         ("config", "no"),
-        ("osc", "no"),
         ("idle", "yes"),
         ("keep-open", "yes"),
         ("input-default-bindings", "no"),
         ("input-vo-keyboard", "no"),
-        ("ytdl", "no"),
         ("gapless-audio", "yes"),
         ("prefetch-playlist", "yes"),
         ("vo", "gpu"),
@@ -47,6 +45,27 @@ pub fn initialize_handle(
     ] {
         handle.set_option_for_action(name, value, &format!("configure libmpv option {name}"))?;
     }
+
+    // `osc` and `ytdl` exist only when mpv was built with Lua: both are declared
+    // inside `#if HAVE_LUA` in options/options.c, because the on-screen
+    // controller and the youtube-dl hook are Lua scripts and these options load
+    // them.
+    //
+    // Unlike macOS, this backend cannot simply omit them. It builds against a
+    // system libmpv on Linux, which normally does have Lua, and there an OSC
+    // drawing over embedded video is a real defect rather than a hypothetical.
+    // So both are attempted and their absence accepted -- a runtime without Lua
+    // has nothing to turn off.
+    //
+    // Setting them unconditionally is what made every createSession fail on the
+    // 0.3.0 Windows package with "Failed to configure libmpv option osc: option
+    // not found". The LGPL runtime that package started bundling is built with
+    // -Dlua=disabled; the compile gate never saw it because that gate builds
+    // against the pinned upstream dev DLL, which has Lua.
+    for (name, value) in [("osc", "no"), ("ytdl", "no")] {
+        handle.set_option_if_present(name, value, &format!("configure libmpv option {name}"))?;
+    }
+
     handle.set_option("volume", &volume_percent.to_string())?;
     handle.set_option("wid", wid)?;
     handle.initialize()?;

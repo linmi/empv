@@ -46,6 +46,26 @@ impl OwnedMpvHandle {
         })
     }
 
+    /// Sets an option that a given mpv build may legitimately not have, and
+    /// reports whether it was there.
+    ///
+    /// Only MPV_ERROR_OPTION_NOT_FOUND is treated as an absence; every other
+    /// negative result is still an error. That distinction is the whole point --
+    /// blanket-ignoring failures here would hide a misspelled option name or a
+    /// rejected value just as effectively as it hides a missing feature.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub fn set_option_if_present(&self, name: &str, value: &str, action: &str) -> MpvResult<bool> {
+        let name_c = cstring(name)?;
+        let value_c = cstring(value)?;
+        let code =
+            unsafe { ffi::mpv_set_option_string(self.raw(), name_c.as_ptr(), value_c.as_ptr()) };
+        if code == ffi::ERROR_OPTION_NOT_FOUND {
+            return Ok(false);
+        }
+        self.check(action, code)?;
+        Ok(true)
+    }
+
     pub fn command(&self, command: &str, action: &str) -> MpvResult<()> {
         let command = cstring(command)?;
         self.check(action, unsafe {

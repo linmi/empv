@@ -479,8 +479,21 @@ jobs:
           Pop-Location
           Get-ChildItem $tarballs
 
-      # The package now carries a libmpv, so what has to be asserted is that it
-      # is the one built here. A GPL DLL arriving by any other route would
+      # Installs the packed tarballs into an empty project outside the checkout
+      # and opens a real mpv session there.
+      #
+      # This job used to skip it, on the reasoning that an addon-only package had
+      # no libmpv to load. That stopped being true when the package started
+      # bundling one, and the gap shipped 0.3.0 with a runtime that failed at the
+      # first createSession: the addon set mpv's `osc` option unconditionally, and
+      # the LGPL build has no Lua, so the option does not exist. Every other check
+      # here passed -- the DLL was present, correct and correctly licensed. Only
+      # loading it would have said otherwise.
+      - name: Verify the prebuilt end to end
+        run: pnpm run verify:prebuilt
+
+      # The package carries a libmpv, so what has to be asserted is that it is
+      # the one built here. A GPL DLL arriving by any other route would
       # relicense everything that installs this.
       - name: Assert the bundled libmpv is the LGPL one
         run: |

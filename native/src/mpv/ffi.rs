@@ -5,6 +5,12 @@ pub struct MpvHandle {
     _private: [u8; 0],
 }
 
+// mpv returns this when an option name is not registered in the build being
+// talked to. It is the one negative result that can mean "this runtime was
+// compiled without that feature" rather than "something went wrong".
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub const ERROR_OPTION_NOT_FOUND: c_int = -5;
+
 pub const FORMAT_NONE: c_int = 0;
 pub const FORMAT_STRING: c_int = 1;
 pub const FORMAT_FLAG: c_int = 3;
