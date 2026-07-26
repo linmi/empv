@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* oxlint-disable no-console -- smoke CLI 脚本：console 是其面向终端的输出通道 */
 //
-// Runtime smoke for the Windows 'wid-window' backend. It loads the freshly
+// Runtime smoke for the Windows 'window' backend. It loads the freshly
 // compiled addon directly from native/build/Release, where Windows also resolves
 // the bundled mpv DLL, validates the real TypeScript contract, generates (or
 // accepts) a five-second ffmpeg fixture, and drives playback through EOF, replay,
@@ -243,11 +243,11 @@ async function main() {
   try {
     assert.equal(
       presentationKind,
-      'wid-window',
-      `getPresentationKind() must be 'wid-window' on Windows, got ${String(presentationKind)}`
+      'window',
+      `getPresentationKind() must be 'window' on Windows, got ${String(presentationKind)}`
     )
     assert.equal(addon.isSupported(), true, 'isSupported() must be true on Windows')
-    log("addon normalized; getPresentationKind() === 'wid-window' OK")
+    log("addon normalized; getPresentationKind() === 'window' OK")
 
     let snapshotEvents = 0
     sessionId = await addon.createSession(
@@ -422,7 +422,7 @@ async function main() {
     )
     log("playlistPlayIndex(2) reached entry 3 with status 'playing' OK")
 
-    assert.equal(frameEvents, 0, 'onFrame must never fire for the wid-window backend')
+    assert.equal(frameEvents, 0, 'onFrame must never fire for the window backend')
   } catch (error) {
     bodyError = error
   }

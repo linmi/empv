@@ -5,7 +5,7 @@ import {
   createEmpvFrameLinkServiceName,
   createEmpvPlaybackHost
 } from '../src/electron/playbackHost.ts'
-import { makeIoSurfaceMachAddon, makeWidWindowAddon } from './support/fakeAddon.ts'
+import { makeLayerAddon, makeWindowAddon } from './support/fakeAddon.ts'
 import { makeFakeRuntimeClient } from './support/fakeClient.ts'
 
 const WINDOW_HANDLE = Buffer.from([1, 2, 3, 4])
@@ -13,7 +13,7 @@ const WINDOW_HANDLE = Buffer.from([1, 2, 3, 4])
 describe('createEmpvPlaybackHost', () => {
   test('hands the client the same frame-link name it registers with the addon', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeIoSurfaceMachAddon()
+    const { loaded, calls } = makeLayerAddon()
     const frameLinkServiceName = createEmpvFrameLinkServiceName()
 
     const host = await createEmpvPlaybackHost({
@@ -32,7 +32,7 @@ describe('createEmpvPlaybackHost', () => {
 
   test('does not register a mach link for a backend that has no link', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeWidWindowAddon()
+    const { loaded, calls } = makeWindowAddon()
 
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
@@ -40,7 +40,7 @@ describe('createEmpvPlaybackHost', () => {
       loadAddon: async () => loaded
     })
 
-    assert.equal(host.presentationKind, 'wid-window')
+    assert.equal(host.presentationKind, 'window')
     assert.equal(
       calls.some((call) => call.method === 'startPresenterLink'),
       false
@@ -51,7 +51,7 @@ describe('createEmpvPlaybackHost', () => {
   // does it. Asking the utility process something trivial first makes that load
   // happen there, so the main-process load lands on a warm kernel cache.
   test('warms the utility process before loading the addon in this one', async () => {
-    const { loaded } = makeIoSurfaceMachAddon()
+    const { loaded } = makeLayerAddon()
     const order: string[] = []
     const warming = makeFakeRuntimeClient({
       invoke: (method) => {
@@ -74,7 +74,7 @@ describe('createEmpvPlaybackHost', () => {
 
   test('reports a failed warm-up but still loads the addon', async () => {
     const failures: unknown[] = []
-    const { loaded } = makeIoSurfaceMachAddon()
+    const { loaded } = makeLayerAddon()
     let loadedInMain = false
 
     const host = await createEmpvPlaybackHost({
@@ -95,12 +95,12 @@ describe('createEmpvPlaybackHost', () => {
     // player's failure, but it must not vanish either.
     assert.equal(loadedInMain, true)
     assert.equal(failures.length, 1)
-    assert.equal(host.presentationKind, 'iosurface-mach')
+    assert.equal(host.presentationKind, 'layer')
   })
 
   test('presents a bound session frame with the arguments the presenter expects', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeIoSurfaceMachAddon()
+    const { loaded, calls } = makeLayerAddon()
 
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
@@ -135,7 +135,7 @@ describe('createEmpvPlaybackHost', () => {
 
   test('drops frames for a session that is not bound to a presenter', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeIoSurfaceMachAddon()
+    const { loaded, calls } = makeLayerAddon()
 
     await createEmpvPlaybackHost({
       client: fakeClient.client,
@@ -158,7 +158,7 @@ describe('createEmpvPlaybackHost', () => {
 
   test('stops presenting once a session is unbound', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeIoSurfaceMachAddon()
+    const { loaded, calls } = makeLayerAddon()
 
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
@@ -189,7 +189,7 @@ describe('createEmpvPlaybackHost', () => {
   test('reports a failed present instead of throwing into the frame callback', async () => {
     const fakeClient = makeFakeRuntimeClient()
     const failures: string[] = []
-    const { loaded } = makeIoSurfaceMachAddon({
+    const { loaded } = makeLayerAddon({
       presentSurface: () => {
         throw new Error('presenter is gone')
       }
@@ -214,26 +214,26 @@ describe('createEmpvPlaybackHost', () => {
   })
 
   test('exposes only the presenter facet its backend actually has', async () => {
-    const machHost = await createEmpvPlaybackHost({
+    const layerHost = await createEmpvPlaybackHost({
       client: makeFakeRuntimeClient().client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => makeIoSurfaceMachAddon().loaded
+      loadAddon: async () => makeLayerAddon().loaded
     })
-    const widHost = await createEmpvPlaybackHost({
+    const windowHost = await createEmpvPlaybackHost({
       client: makeFakeRuntimeClient().client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => makeWidWindowAddon().loaded
+      loadAddon: async () => makeWindowAddon().loaded
     })
 
-    assert.equal(machHost.presentationKind, 'iosurface-mach')
-    assert.equal(widHost.presentationKind, 'wid-window')
-    if (machHost.presentationKind === 'iosurface-mach') {
-      assert.equal(typeof machHost.observeWindowOcclusion, 'function')
+    assert.equal(layerHost.presentationKind, 'layer')
+    assert.equal(windowHost.presentationKind, 'window')
+    if (layerHost.presentationKind === 'layer') {
+      assert.equal(typeof layerHost.observeWindowOcclusion, 'function')
     }
-    if (widHost.presentationKind === 'wid-window') {
-      assert.equal(typeof widHost.adoptVideoWindow, 'function')
+    if (windowHost.presentationKind === 'window') {
+      assert.equal(typeof windowHost.adoptVideoWindow, 'function')
     }
-    assert.equal('adoptVideoWindow' in machHost, false)
-    assert.equal('observeWindowOcclusion' in widHost, false)
+    assert.equal('adoptVideoWindow' in layerHost, false)
+    assert.equal('observeWindowOcclusion' in windowHost, false)
   })
 })

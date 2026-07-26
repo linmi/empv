@@ -5,7 +5,7 @@ import { afterEach, describe, test } from 'node:test'
 import { EMPV_FRAME_LINK_ENV_KEY } from '../src/electron/protocol.ts'
 import { startEmpvRuntimeProcess } from '../src/electron/runtimeProcess.ts'
 import type { EmpvRuntimeParentPort } from '../src/electron/runtimeProcess.ts'
-import { makeIoSurfaceMachAddon, makeWidWindowAddon } from './support/fakeAddon.ts'
+import { makeLayerAddon, makeWindowAddon } from './support/fakeAddon.ts'
 
 // Nothing here may let the idle timer fire: it calls process.exit and would take
 // the test runner with it.
@@ -83,7 +83,7 @@ describe('startEmpvRuntimeProcess', () => {
     const port = makeFakeParentPort()
     setFrameLinkServiceName('test.frame.link')
     const loadGate = makeGate()
-    const { loaded } = makeIoSurfaceMachAddon()
+    const { loaded } = makeLayerAddon()
 
     runningHandles.push(
       startEmpvRuntimeProcess({
@@ -134,7 +134,7 @@ describe('startEmpvRuntimeProcess', () => {
   test('answers a request with the addon result, keyed to the request id', async () => {
     const port = makeFakeParentPort()
     setFrameLinkServiceName('test.frame.link')
-    const { loaded } = makeIoSurfaceMachAddon()
+    const { loaded } = makeLayerAddon()
 
     runningHandles.push(
       startEmpvRuntimeProcess({
@@ -155,7 +155,7 @@ describe('startEmpvRuntimeProcess', () => {
   test('reports an addon failure as an error reply rather than dying', async () => {
     const port = makeFakeParentPort()
     setFrameLinkServiceName('test.frame.link')
-    const { loaded } = makeIoSurfaceMachAddon({
+    const { loaded } = makeLayerAddon({
       seek: () => {
         const error = new Error('seek is out of range')
         error.name = 'RangeError'
@@ -185,7 +185,7 @@ describe('startEmpvRuntimeProcess', () => {
   test('forwards a contract method to the addon with its own arguments', async () => {
     const port = makeFakeParentPort()
     setFrameLinkServiceName('test.frame.link')
-    const { loaded, calls } = makeIoSurfaceMachAddon()
+    const { loaded, calls } = makeLayerAddon()
 
     runningHandles.push(
       startEmpvRuntimeProcess({
@@ -212,7 +212,7 @@ describe('startEmpvRuntimeProcess', () => {
   test('rejects a method that is not in the contract', async () => {
     const port = makeFakeParentPort()
     setFrameLinkServiceName('test.frame.link')
-    const { loaded } = makeIoSurfaceMachAddon()
+    const { loaded } = makeLayerAddon()
 
     runningHandles.push(
       startEmpvRuntimeProcess({
@@ -229,10 +229,10 @@ describe('startEmpvRuntimeProcess', () => {
     assert.match(String(reply?.message), /Unsupported empv playback runtime method/)
   })
 
-  test('a mach backend without a frame-link service name fails loudly', async () => {
+  test('a layer backend without a frame-link service name fails loudly', async () => {
     const port = makeFakeParentPort()
     setFrameLinkServiceName(undefined)
-    const { loaded } = makeIoSurfaceMachAddon()
+    const { loaded } = makeLayerAddon()
 
     runningHandles.push(
       startEmpvRuntimeProcess({
@@ -249,40 +249,46 @@ describe('startEmpvRuntimeProcess', () => {
     assert.match(String(reply?.message), new RegExp(EMPV_FRAME_LINK_ENV_KEY))
   })
 
-  // 'wid-window' renders into an OS window the utility owns, so its handle has to
-  // reach the main process for reparenting. 'iosurface-mach' has no such window
+  // 'window' renders into an OS window the utility owns, so its handle has to
+  // reach the main process for reparenting. 'layer' has no such window
   // and must not invent one.
   test('reports a video window handle only for the backend that has one', async () => {
-    const machPort = makeFakeParentPort()
+    const layerPort = makeFakeParentPort()
     setFrameLinkServiceName('test.frame.link')
-    const mach = makeIoSurfaceMachAddon()
+    const layer = makeLayerAddon()
     runningHandles.push(
       startEmpvRuntimeProcess({
-        parentPort: machPort,
+        parentPort: layerPort,
         idleTimeoutMs: NEVER_IDLE_MS,
-        loadAddon: async () => mach.loaded
+        loadAddon: async () => layer.loaded
       })
     )
-    machPort.deliver({ id: 1, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    layerPort.deliver({ id: 1, method: 'createSession', args: [{ options: { volume: 1 } }] })
     await sleep(20)
-    const [machReply] = machPort.posted.filter((message) => message.id === 1)
-    assert.ok(machReply, 'The mach backend never answered sessions.create.')
-    assert.equal((machReply.result as { videoWindowHandle: number | null }).videoWindowHandle, null)
+    const [layerReply] = layerPort.posted.filter((message) => message.id === 1)
+    assert.ok(layerReply, 'The mach backend never answered sessions.create.')
+    assert.equal(
+      (layerReply.result as { videoWindowHandle: number | null }).videoWindowHandle,
+      null
+    )
 
-    const widPort = makeFakeParentPort()
-    const wid = makeWidWindowAddon()
+    const windowPort = makeFakeParentPort()
+    const windowBackend = makeWindowAddon()
     runningHandles.push(
       startEmpvRuntimeProcess({
-        parentPort: widPort,
+        parentPort: windowPort,
         idleTimeoutMs: NEVER_IDLE_MS,
-        loadAddon: async () => wid.loaded
+        loadAddon: async () => windowBackend.loaded
       })
     )
-    widPort.deliver({ id: 2, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    windowPort.deliver({ id: 2, method: 'createSession', args: [{ options: { volume: 1 } }] })
     await sleep(20)
-    const [widReply] = widPort.posted.filter((message) => message.id === 2)
-    assert.ok(widReply, 'The wid backend never answered sessions.create.')
-    assert.equal((widReply.result as { videoWindowHandle: number | null }).videoWindowHandle, 4242)
+    const [windowReply] = windowPort.posted.filter((message) => message.id === 2)
+    assert.ok(windowReply, 'The wid backend never answered sessions.create.')
+    assert.equal(
+      (windowReply.result as { videoWindowHandle: number | null }).videoWindowHandle,
+      4242
+    )
   })
 
   test('routes snapshot and frame notifications to the parent port', async () => {
@@ -290,7 +296,7 @@ describe('startEmpvRuntimeProcess', () => {
     setFrameLinkServiceName('test.frame.link')
     let publishSnapshot = (): void => {}
     let publishFrame = (_a: number, _b: number, _c: number): void => {}
-    const { loaded } = makeIoSurfaceMachAddon({
+    const { loaded } = makeLayerAddon({
       createSession: async (
         _options: unknown,
         onSnapshotChanged: () => void,

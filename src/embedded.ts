@@ -183,10 +183,10 @@ export type LibMpvFrameNotifier = (
 
 // How a backend gets decoded video from the utility process to the on-screen
 // window. macOS ships IOSurfaces to a CALayer over a mach frame link
-// ('iosurface-mach'); Windows/Linux embed an OS video window that the main
-// process reparents into the app window ('wid-window'). Callers MUST branch on
+// ('layer'); Windows/Linux embed an OS video window that the main
+// process reparents into the app window ('window'). Callers MUST branch on
 // this to reach the right presentation facet — the two facets are disjoint.
-export type LibMpvPresentationKind = 'iosurface-mach' | 'wid-window'
+export type LibMpvPresentationKind = 'layer' | 'window'
 
 // The API family every backend exports regardless of presentation model: mpv
 // session control (utility process) plus presenter bounds/scale/visibility (main
@@ -209,7 +209,7 @@ export type LibMpvEmbeddedCoreAddon = {
   // state, errors, hwdec / codec / video size) immediately, while position /
   // demuxer-cache / dropped-frame-only changes are coalesced to at most one
   // notification per 250ms. onFrame carries rendered frames to the presenter on
-  // 'iosurface-mach'; on 'wid-window' mpv renders straight into its window and
+  // 'layer'; on 'window' mpv renders straight into its window and
   // onFrame never fires.
   createSession(
     options: LibMpvSessionOptions,
@@ -222,12 +222,12 @@ export type LibMpvEmbeddedCoreAddon = {
   captureFrame(sessionId: string): LibMpvCapturedFrame | null
   // Sets the render pixel size (IOSurface pool size) the session renders into.
   // Called on create and whenever the presenter's bounds/scale change. On
-  // 'wid-window' mpv sizes itself to its window (the presenter owns that), so
+  // 'window' mpv sizes itself to its window (the presenter owns that), so
   // this is a no-op there.
   setRenderSize(sessionId: string, widthPixels: number, heightPixels: number): void
   // Suspends rendering only (audio/decode continue) while the hosting window is
   // hidden, minimized, or fully occluded; resuming forces one render so the
-  // presenter repaints the current frame immediately. On 'wid-window' the
+  // presenter repaints the current frame immediately. On 'window' the
   // presenter hides the window instead, so this is a no-op there.
   setPresentationSuspended(sessionId: string, suspended: boolean): void
   reloadSubtitle(sessionId: string, subtitlePath: string | null): void
@@ -311,8 +311,8 @@ export type LibMpvEmbeddedCoreAddon = {
   // --- Presenter-side API (main process) ---
   // Creates the presenter for the window resolved from the Electron native window
   // handle, keyed by an opaque presenterId, and returns the render pixel size the
-  // session must size to. On 'iosurface-mach' this attaches a CALayer; on
-  // 'wid-window' it stores the parent window + bounds and reparents the session's
+  // session must size to. On 'layer' this attaches a CALayer; on
+  // 'window' it stores the parent window + bounds and reparents the session's
   // video window once adoptVideoWindow supplies the child handle.
   createPresenter(
     presenterId: string,
@@ -328,15 +328,15 @@ export type LibMpvEmbeddedCoreAddon = {
   destroyPresenter(presenterId: string): void
   // Installs (color) or removes (null) an opaque theme-colored layer at the
   // bottom of the window so punched-transparent page regions keep the app
-  // background while underlay video is active. No-op on 'wid-window' (the video
+  // background while underlay video is active. No-op on 'window' (the video
   // window is opaque and composites above the web contents; no punch-through).
   setWindowBackdrop(windowHandle: Buffer, color: string | null): void
 }
 
 // macOS: mpv renders into an offscreen IOSurface pool shipped to a main-process
 // CALayer presenter over a mach frame link.
-export type LibMpvIoSurfaceMachAddon = LibMpvEmbeddedCoreAddon & {
-  getPresentationKind(): 'iosurface-mach'
+export type LibMpvLayerAddon = LibMpvEmbeddedCoreAddon & {
+  getPresentationKind(): 'layer'
   // Sets the mach bootstrap service name the utility uses to reach the
   // main-process frame-link receiver (the name the main process registered via
   // startPresenterLink). Must be called before any session is created; the send
@@ -379,8 +379,8 @@ export type LibMpvIoSurfaceMachAddon = LibMpvEmbeddedCoreAddon & {
 // Windows/Linux: mpv renders into an OS video window the utility process owns;
 // the main-process presenter reparents it into the app window. No mach frame
 // link exists, so the mach-link functions are absent by design.
-export type LibMpvWidWindowAddon = LibMpvEmbeddedCoreAddon & {
-  getPresentationKind(): 'wid-window'
+export type LibMpvWindowAddon = LibMpvEmbeddedCoreAddon & {
+  getPresentationKind(): 'window'
   // The session's video window handle (HWND / X11 window id, as a number), read
   // by the utility runtime and shipped to the main process. null when the
   // session is unknown or has no window yet.
@@ -393,17 +393,17 @@ export type LibMpvWidWindowAddon = LibMpvEmbeddedCoreAddon & {
 // A loaded backend is exactly one of the two facets, discriminated by the kind
 // probed at load time. Consumers branch on getPresentationKind()'s value via this
 // union to reach a facet's functions.
-export type LibMpvEmbeddedNativeAddon = LibMpvIoSurfaceMachAddon | LibMpvWidWindowAddon
+export type LibMpvEmbeddedNativeAddon = LibMpvLayerAddon | LibMpvWindowAddon
 
 export type LoadedEmbeddedLibMpvAddon =
   | {
-      presentationKind: 'iosurface-mach'
-      addon: LibMpvIoSurfaceMachAddon
+      presentationKind: 'layer'
+      addon: LibMpvLayerAddon
       runtime: LibMpvRuntime
     }
   | {
-      presentationKind: 'wid-window'
-      addon: LibMpvWidWindowAddon
+      presentationKind: 'window'
+      addon: LibMpvWindowAddon
       runtime: LibMpvRuntime
     }
 
@@ -477,8 +477,8 @@ const CORE_FUNCTIONS = [
   'setWindowBackdrop'
 ] as const
 
-// mach-link facet ('iosurface-mach').
-const IOSURFACE_MACH_FUNCTIONS = [
+// mach-link facet ('layer').
+const LAYER_FUNCTIONS = [
   'configureFrameLink',
   'startPresenterLink',
   'stopPresenterLink',
@@ -487,26 +487,24 @@ const IOSURFACE_MACH_FUNCTIONS = [
   'unobserveWindowOcclusion'
 ] as const
 
-// Window-embedding facet ('wid-window').
-const WID_WINDOW_FUNCTIONS = ['getVideoWindowHandle', 'adoptVideoWindow'] as const
+// Window-embedding facet ('window').
+const WINDOW_FUNCTIONS = ['getVideoWindowHandle', 'adoptVideoWindow'] as const
 
-function isLibMpvIoSurfaceMachAddon(
+function isLibMpvLayerAddon(
   candidate: Record<string, unknown>
-): candidate is Record<string, unknown> & LibMpvIoSurfaceMachAddon {
-  return (
-    hasFunctions(candidate, CORE_FUNCTIONS) && hasFunctions(candidate, IOSURFACE_MACH_FUNCTIONS)
-  )
+): candidate is Record<string, unknown> & LibMpvLayerAddon {
+  return hasFunctions(candidate, CORE_FUNCTIONS) && hasFunctions(candidate, LAYER_FUNCTIONS)
 }
 
-function isLibMpvWidWindowAddon(
+function isLibMpvWindowAddon(
   candidate: Record<string, unknown>
-): candidate is Record<string, unknown> & LibMpvWidWindowAddon {
-  return hasFunctions(candidate, CORE_FUNCTIONS) && hasFunctions(candidate, WID_WINDOW_FUNCTIONS)
+): candidate is Record<string, unknown> & LibMpvWindowAddon {
+  return hasFunctions(candidate, CORE_FUNCTIONS) && hasFunctions(candidate, WINDOW_FUNCTIONS)
 }
 
 export type NormalizedEmbeddedAddon =
-  | { presentationKind: 'iosurface-mach'; addon: LibMpvIoSurfaceMachAddon }
-  | { presentationKind: 'wid-window'; addon: LibMpvWidWindowAddon }
+  | { presentationKind: 'layer'; addon: LibMpvLayerAddon }
+  | { presentationKind: 'window'; addon: LibMpvWindowAddon }
 
 // Validates the core surface, probes getPresentationKind(), then validates the
 // facet functions the reported kind requires. Returns the addon tagged with its
@@ -521,19 +519,17 @@ export function normalizeEmbeddedAddon(value: unknown): NormalizedEmbeddedAddon 
 
   const presentationKind = candidate.getPresentationKind()
 
-  if (presentationKind === 'iosurface-mach') {
-    if (!isLibMpvIoSurfaceMachAddon(candidate)) {
-      throw new Error(
-        'libmpv native addon reports iosurface-mach but is missing its mach frame-link API.'
-      )
+  if (presentationKind === 'layer') {
+    if (!isLibMpvLayerAddon(candidate)) {
+      throw new Error('libmpv native addon reports layer but is missing its mach frame-link API.')
     }
     return { presentationKind, addon: candidate }
   }
 
-  if (presentationKind === 'wid-window') {
-    if (!isLibMpvWidWindowAddon(candidate)) {
+  if (presentationKind === 'window') {
+    if (!isLibMpvWindowAddon(candidate)) {
       throw new Error(
-        'libmpv native addon reports wid-window but is missing its video-window embedding API.'
+        'libmpv native addon reports window but is missing its video-window embedding API.'
       )
     }
     return { presentationKind, addon: candidate }

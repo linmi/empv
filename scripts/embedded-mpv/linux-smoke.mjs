@@ -2,7 +2,7 @@
 /* oxlint-disable no-console -- smoke CLI 脚本：console 是其面向终端的输出通道 */
 //
 // linux-smoke.mjs — runtime smoke test for the freshly compiled Linux
-// 'wid-window' embedded-mpv addon. Run under a real X display (xvfb-run) by the
+// 'window' embedded-mpv addon. Run under a real X display (xvfb-run) by the
 // "libmpv native compile gate" workflow's linux-smoke job:
 //
 //   xvfb-run -a node --experimental-strip-types \
@@ -113,10 +113,10 @@ async function main() {
   // 1. Presentation kind + support probe (fixed by the Linux backend).
   assert.equal(
     presentationKind,
-    'wid-window',
-    `getPresentationKind() must be 'wid-window' on Linux, got ${String(presentationKind)}`
+    'window',
+    `getPresentationKind() must be 'window' on Linux, got ${String(presentationKind)}`
   )
-  log("getPresentationKind() === 'wid-window' OK")
+  log("getPresentationKind() === 'window' OK")
 
   const supported = addon.isSupported()
   assert.equal(supported, true, `isSupported() must be true under X, got ${String(supported)}`)
@@ -126,7 +126,7 @@ async function main() {
   //    redirect, unmapped X11 video window and binds mpv to it via `wid`; no
   //    parent window is needed for the session half. onSnapshotChanged/onFrame
   //    are accepted for contract parity — we poll getSessionSnapshot instead, and
-  //    onFrame never fires on 'wid-window'.
+  //    onFrame never fires on 'window'.
   let snapshotEvents = 0
   const sessionId = await addon.createSession(
     { volume: 1.0 },

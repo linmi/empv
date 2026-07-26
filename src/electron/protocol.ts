@@ -40,9 +40,9 @@ export type EmpvRuntimeSessionCreateInput = {
 export type EmpvRuntimeSessionCreateResult = {
   sessionId: string
   snapshot: LibMpvSessionSnapshot | null
-  // 'wid-window' backends render into an OS video window the utility owns; its
+  // 'window' backends render into an OS video window the utility owns; its
   // native handle is shipped here so the main-process presenter can reparent it
-  // (adoptVideoWindow). null on 'iosurface-mach', where frames cross the mach
+  // (adoptVideoWindow). null on 'layer', where frames cross the mach
   // frame link instead and there is no window to adopt.
   videoWindowHandle: number | null
 }

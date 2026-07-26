@@ -6,19 +6,22 @@ name: native compile gate
 #   需要在目标平台真实编译、链接，并由 Linux smoke 驱动完整播放契约。
 #
 # 门禁边界（job 矩阵）：
+#   * macos：'layer' 后端的编译 + 运行时。单 job 完成编译与 smoke（IOSurface 池、
+#     mach 帧链、真实播放、RGBA 回读），因为两者用的是同一份 Homebrew libmpv。
 #   * linux / windows：覆盖「编译 + 链接」——cargo/napi 必须以 0 退出且真的产出
 #     build/Release/empv.node（每个 job 最后一步断言产物存在）。
 #   * linux-smoke：把 Linux 从「编译通过」升级为「运行时可跑」。它复用 linux job
 #     编出的 .node（经 upload/download-artifact 传递），在 xvfb-run 提供的真实 X
 #     显示下真正加载 .node、mpv_create、建窗口并驱动一段真实播放，断言
-#     'wid-window' 会话契约（见该 job 内注释）。Windows 运行时由独立的
+#     'window' 会话契约（见该 job 内注释）。Windows 运行时由独立的
 #     libmpv-windows-interactive.yml 在登录桌面的自托管 runner 上覆盖，机器离线
 #     不影响本 hosted compile workflow 的结论。
 #   * runtime-patches：verify:runtime-patches 的 dry-run 门禁——下载 pinned mpv
 #     源码，patch --forward --dry-run 校验 vendored patch，并断言 meson 选项 +
 #     构建脚本 flag 的不变量。不编译、不 meson/ninja、不建窗口。
-#   * 仍不覆盖：Wayland。Electron BrowserWindow presenter 重投与 Windows
-#     原生显示器像素验证归独立 interactive workflow。
+#   * 仍不覆盖：Wayland；macOS 的 CALayer presenter 与 BrowserWindow 合成（smoke
+#     只跑会话侧，不建 presenter）。Electron BrowserWindow presenter 重投与
+#     Windows 原生显示器像素验证归消费方的 interactive workflow。
 #
 # 为什么直接驱动 napi build，而不是 pnpm build:native：
 #   scripts/build-native.cjs 的 resolveRuntime() 只认 vendor/
@@ -263,6 +266,100 @@ jobs:
           Get-Item $nodeFile | Format-List FullName, Length
 
   # ───────────────────────────────────────────────────────────────────────────
+  # macOS：'layer' 后端的编译 + 运行时门禁。与 linux 不同，这里不拆两个 job——
+  # 编译和 smoke 需要的是同一份 Homebrew libmpv，拆开只会重装一遍。
+  #
+  # Homebrew libmpv 在这里是**仅编译/冒烟输入**，与 windows job 用 pinned dev 包
+  # 同性质：发布运行时只认 build-runtime:macos 从 pinned 源码构建的 LGPL 版本。
+  # 尤其注意音频策略——vendored runtime 以 -Dcoreaudio=disabled 构建来规避 mpv 0.41
+  # 的 CoreAudio 热插拔崩溃路径，Homebrew 版没有这个保证；smoke 跑的是无音轨的
+  # testsrc，碰不到那条路径，但不能据此认为 Homebrew 运行时可发布。
+  #
+  # LIBMPV_LIBRARY_DIR 一设，build.rs 就跳过 vendored 目录校验直接链接该目录
+  # （resolve_macos_library）；Homebrew 的 install_name 是绝对路径，运行时无需 rpath。
+  # ───────────────────────────────────────────────────────────────────────────
+  macos:
+    name: macos (macos-latest, arm64)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native -> target
+
+      # mpv 带入 libmpv.dylib；ffmpeg 供 smoke 现场生成 5s testsrc fixture。
+      - name: Install libmpv + ffmpeg (Homebrew, compile/smoke input only)
+        run: brew install mpv ffmpeg
+
+      - name: Setup pnpm (from packageManager field)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # 用 brew --prefix 解析而不是硬编码 /opt/homebrew，这样 runner 换成 Intel
+      # 镜像（/usr/local）也不会静默走错目录。
+      - name: Resolve Homebrew libmpv paths
+        run: |
+          set -euo pipefail
+          brew_prefix="$(brew --prefix mpv)"
+          library_dir="${brew_prefix}/lib"
+          test -e "${library_dir}/libmpv.dylib" -o -e "${library_dir}/libmpv.2.dylib" \
+            || { echo "missing libmpv in ${library_dir}"; exit 1; }
+          echo "LIBMPV_LIBRARY_DIR=${library_dir}" >> "$GITHUB_ENV"
+          echo "resolved libmpv lib=${library_dir}"
+
+      # macOS 专属的 cfg 代码（session/macos.rs 的渲染 worker 与帧代次测试）只有在
+      # 这里才会被编译和执行。
+      - name: Check Rust formatting, lint, and tests
+        run: |
+          pnpm run lint
+          pnpm run test
+
+      - name: Compile embedded mpv addon (Rust + clang)
+        run: |
+          pnpm exec napi build \
+            --release \
+            --target aarch64-apple-darwin \
+            --cwd "${GITHUB_WORKSPACE}/native" \
+            --manifest-path "${GITHUB_WORKSPACE}/native/Cargo.toml" \
+            --package-json-path "${GITHUB_WORKSPACE}/package.json" \
+            --output-dir "${GITHUB_WORKSPACE}/native/build/Release"
+
+      - name: Assert empv.node was produced
+        run: |
+          node_file="${GITHUB_WORKSPACE}/native/build/Release/empv.node"
+          test -f "$node_file" || { echo "missing $node_file"; exit 1; }
+          if compgen -G "${GITHUB_WORKSPACE}/native/build/Release/empv.*.node" > /dev/null; then
+            echo "platform-suffixed empv artifact is forbidden"
+            exit 1
+          fi
+          echo "produced $node_file"
+
+      # 真加载 .node、建 IOSurface 池、起 mach 帧链、驱动播放并回读 RGBA。
+      # 不建 presenter/窗口，所以无需登录桌面：CGL 离屏 + IOSurface + mach bootstrap
+      # 在 runner 的用户会话里就够。BrowserWindow 合成归消费方的交互式门禁。
+      - name: Run the macOS runtime smoke
+        run: node --experimental-strip-types scripts/embedded-mpv/macos-smoke.mjs
+
+  # ───────────────────────────────────────────────────────────────────────────
   # runtime-patches：vendored mpv patch 的 dry-run 门禁（相对编译 job 而言的快 job）。
   # scripts/embedded-mpv/verify-patches.mjs 下载 pinned mpv 源码 tar 包，对
   # patches/ 下每个 patch 跑 `patch -p1 --forward --dry-run`（--forward 关键：
@@ -322,7 +419,7 @@ jobs:
   # linux-smoke：Linux 运行时冒烟（本轮主目标）。把 Linux 从「编译通过」升级为
   # 「真机可跑」——复用 linux job 编好的 .node（needs: linux + download-artifact），
   # 在 xvfb-run 提供的真实 X 显示下真正加载 .node、mpv_create、建窗口并驱动一段
-  # 真实播放，断言 'wid-window' 会话契约（断言清单见 linux-smoke.mjs）。
+  # 真实播放，断言 'window' 会话契约（断言清单见 linux-smoke.mjs）。
   #
   # 只跑 session 半边（mpv 初始化 + 自建 override-redirect 未挂载视频窗口 + 播放）。
   # presenter 半边（createPresenter/adoptVideoWindow 把视频窗口 reparent 进宿主

@@ -51,7 +51,7 @@ const CORE_FUNCTION_NAMES = [
   'setWindowBackdrop'
 ]
 
-const IOSURFACE_MACH_FUNCTION_NAMES = [
+const LAYER_FUNCTION_NAMES = [
   'configureFrameLink',
   'startPresenterLink',
   'stopPresenterLink',
@@ -60,7 +60,7 @@ const IOSURFACE_MACH_FUNCTION_NAMES = [
   'unobserveWindowOcclusion'
 ]
 
-const WID_WINDOW_FUNCTION_NAMES = ['getVideoWindowHandle', 'adoptVideoWindow']
+const WINDOW_FUNCTION_NAMES = ['getVideoWindowHandle', 'adoptVideoWindow']
 
 function makeAddon(presentationKind: string, functionNames: string[]): Record<string, unknown> {
   const addon: Record<string, unknown> = {}
@@ -69,38 +69,38 @@ function makeAddon(presentationKind: string, functionNames: string[]): Record<st
   return addon
 }
 
-function makeIoSurfaceMachAddon(): Record<string, unknown> {
-  return makeAddon('iosurface-mach', [...CORE_FUNCTION_NAMES, ...IOSURFACE_MACH_FUNCTION_NAMES])
+function makeLayerAddon(): Record<string, unknown> {
+  return makeAddon('layer', [...CORE_FUNCTION_NAMES, ...LAYER_FUNCTION_NAMES])
 }
 
-function makeWidWindowAddon(): Record<string, unknown> {
-  return makeAddon('wid-window', [...CORE_FUNCTION_NAMES, ...WID_WINDOW_FUNCTION_NAMES])
+function makeWindowAddon(): Record<string, unknown> {
+  return makeAddon('window', [...CORE_FUNCTION_NAMES, ...WINDOW_FUNCTION_NAMES])
 }
 
 describe('normalizeEmbeddedAddon', () => {
-  test('tags a mach backend with the kind it reports', () => {
-    const normalized = normalizeEmbeddedAddon(makeIoSurfaceMachAddon())
+  test('tags a layer backend with the kind it reports', () => {
+    const normalized = normalizeEmbeddedAddon(makeLayerAddon())
 
-    assert.equal(normalized.presentationKind, 'iosurface-mach')
+    assert.equal(normalized.presentationKind, 'layer')
     assert.equal(typeof normalized.addon.presentSurface, 'function')
   })
 
   test('tags a window-embedding backend with the kind it reports', () => {
-    const normalized = normalizeEmbeddedAddon(makeWidWindowAddon())
+    const normalized = normalizeEmbeddedAddon(makeWindowAddon())
 
-    assert.equal(normalized.presentationKind, 'wid-window')
+    assert.equal(normalized.presentationKind, 'window')
     assert.equal(typeof normalized.addon.adoptVideoWindow, 'function')
   })
 
   test('unwraps a default-exported module', () => {
-    const normalized = normalizeEmbeddedAddon({ default: makeWidWindowAddon() })
+    const normalized = normalizeEmbeddedAddon({ default: makeWindowAddon() })
 
-    assert.equal(normalized.presentationKind, 'wid-window')
+    assert.equal(normalized.presentationKind, 'window')
   })
 
   test('refuses a backend that is missing any part of the shared core', () => {
     for (const missingName of CORE_FUNCTION_NAMES) {
-      const addon = makeIoSurfaceMachAddon()
+      const addon = makeLayerAddon()
       delete addon[missingName]
 
       assert.throws(
@@ -111,28 +111,28 @@ describe('normalizeEmbeddedAddon', () => {
     }
   })
 
-  test('refuses a mach backend that cannot do the mach frame link', () => {
-    for (const missingName of IOSURFACE_MACH_FUNCTION_NAMES) {
-      const addon = makeIoSurfaceMachAddon()
+  test('refuses a layer backend that cannot do the mach frame link', () => {
+    for (const missingName of LAYER_FUNCTION_NAMES) {
+      const addon = makeLayerAddon()
       delete addon[missingName]
 
       assert.throws(
         () => normalizeEmbeddedAddon(addon),
         /mach frame-link/,
-        `Dropping ${missingName} must not load as iosurface-mach.`
+        `Dropping ${missingName} must not load as layer.`
       )
     }
   })
 
   test('refuses a window backend that cannot embed its video window', () => {
-    for (const missingName of WID_WINDOW_FUNCTION_NAMES) {
-      const addon = makeWidWindowAddon()
+    for (const missingName of WINDOW_FUNCTION_NAMES) {
+      const addon = makeWindowAddon()
       delete addon[missingName]
 
       assert.throws(
         () => normalizeEmbeddedAddon(addon),
         /video-window embedding/,
-        `Dropping ${missingName} must not load as wid-window.`
+        `Dropping ${missingName} must not load as window.`
       )
     }
   })
@@ -140,12 +140,15 @@ describe('normalizeEmbeddedAddon', () => {
   // The two facets are disjoint: a backend must not be accepted on the strength
   // of the other facet's functions.
   test('refuses a backend whose facet does not match the kind it reports', () => {
-    const machShapedButReportingWid = makeAddon('wid-window', [
+    const layerShapedButReportingWindow = makeAddon('window', [
       ...CORE_FUNCTION_NAMES,
-      ...IOSURFACE_MACH_FUNCTION_NAMES
+      ...LAYER_FUNCTION_NAMES
     ])
 
-    assert.throws(() => normalizeEmbeddedAddon(machShapedButReportingWid), /video-window embedding/)
+    assert.throws(
+      () => normalizeEmbeddedAddon(layerShapedButReportingWindow),
+      /video-window embedding/
+    )
   })
 
   test('refuses a kind it does not know how to drive', () => {

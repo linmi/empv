@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* oxlint-disable no-console -- smoke CLI 脚本：console 是其面向终端的输出通道 */
 //
-// Runtime baseline for the macOS 'iosurface-mach' backend. It loads the native
+// Runtime baseline for the macOS 'layer' backend. It loads the native
 // addon directly, validates the real TypeScript contract, drives a generated
 // five-second fixture through playback/EOF/replay/playlist behavior, and makes
 // rendered-frame delivery plus RGBA readback hard requirements.
@@ -213,11 +213,11 @@ async function main() {
   const { addon, presentationKind } = normalized
   assert.equal(
     presentationKind,
-    'iosurface-mach',
-    `getPresentationKind() must be 'iosurface-mach' on macOS, got ${String(presentationKind)}`
+    'layer',
+    `getPresentationKind() must be 'layer' on macOS, got ${String(presentationKind)}`
   )
   assert.equal(addon.isSupported(), true, 'isSupported() must be true on macOS')
-  log("addon normalized; getPresentationKind() === 'iosurface-mach' OK")
+  log("addon normalized; getPresentationKind() === 'layer' OK")
 
   const frameLinkService = `com.empv.macos-smoke.${process.pid}.${Date.now()}`
   addon.startPresenterLink(frameLinkService)

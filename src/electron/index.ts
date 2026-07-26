@@ -13,10 +13,10 @@ export {
 export {
   createEmpvFrameLinkServiceName,
   createEmpvPlaybackHost,
-  type EmpvIoSurfaceMachHost,
+  type EmpvLayerHost,
   type EmpvPlaybackHost,
   type EmpvPlaybackHostOptions,
-  type EmpvWidWindowHost
+  type EmpvWindowHost
 } from './playbackHost.ts'
 
 export {

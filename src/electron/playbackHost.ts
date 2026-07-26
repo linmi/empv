@@ -74,18 +74,18 @@ type EmpvPlaybackHostCore = {
 
 // The two facets stay disjoint here exactly as they are on the addon: a caller
 // branches on presentationKind to reach the half that exists.
-export type EmpvIoSurfaceMachHost = EmpvPlaybackHostCore & {
-  readonly presentationKind: 'iosurface-mach'
+export type EmpvLayerHost = EmpvPlaybackHostCore & {
+  readonly presentationKind: 'layer'
   observeWindowOcclusion(windowHandle: Buffer, onChange: (visible: boolean) => void): void
   unobserveWindowOcclusion(windowHandle: Buffer): void
 }
 
-export type EmpvWidWindowHost = EmpvPlaybackHostCore & {
-  readonly presentationKind: 'wid-window'
+export type EmpvWindowHost = EmpvPlaybackHostCore & {
+  readonly presentationKind: 'window'
   adoptVideoWindow(presenterId: string, childWindowHandle: number): void
 }
 
-export type EmpvPlaybackHost = EmpvIoSurfaceMachHost | EmpvWidWindowHost
+export type EmpvPlaybackHost = EmpvLayerHost | EmpvWindowHost
 
 // One name per main process, fixed for its lifetime: the presenter registers it
 // here and every utility spawn -- including every respawn after a crash -- looks
@@ -126,16 +126,16 @@ export async function createEmpvPlaybackHost(
   const loaded = await loadAddon()
   const { addon } = loaded
 
-  // The mach frame-link receiver only exists on 'iosurface-mach'. 'wid-window'
+  // The mach frame-link receiver only exists on 'layer'. 'window'
   // reparents an OS video window instead -- no link, no presentSurface. A failed
   // registration throws here rather than leaving frames with nowhere to land.
-  if (loaded.presentationKind === 'iosurface-mach') {
+  if (loaded.presentationKind === 'layer') {
     loaded.addon.startPresenterLink(frameLinkServiceName)
   }
 
   const presenterBySession = new Map<string, string>()
 
-  if (loaded.presentationKind === 'iosurface-mach') {
+  if (loaded.presentationKind === 'layer') {
     const machAddon = loaded.addon
     client.onFrame((event) => {
       const presenterId = presenterBySession.get(event.sessionId)
@@ -173,11 +173,11 @@ export async function createEmpvPlaybackHost(
     setWindowBackdrop: (windowHandle, color) => addon.setWindowBackdrop(windowHandle, color)
   }
 
-  if (loaded.presentationKind === 'iosurface-mach') {
+  if (loaded.presentationKind === 'layer') {
     const machAddon = loaded.addon
     return {
       ...core,
-      presentationKind: 'iosurface-mach',
+      presentationKind: 'layer',
       observeWindowOcclusion: (windowHandle, onChange) =>
         machAddon.observeWindowOcclusion(windowHandle, onChange),
       unobserveWindowOcclusion: (windowHandle) => machAddon.unobserveWindowOcclusion(windowHandle)
@@ -187,7 +187,7 @@ export async function createEmpvPlaybackHost(
   const widAddon = loaded.addon
   return {
     ...core,
-    presentationKind: 'wid-window',
+    presentationKind: 'window',
     adoptVideoWindow: (presenterId, childWindowHandle) =>
       widAddon.adoptVideoWindow(presenterId, childWindowHandle)
   }

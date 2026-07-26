@@ -1,11 +1,11 @@
 import type {
   LibMpvCapturedFrame,
-  LibMpvIoSurfaceMachAddon,
+  LibMpvLayerAddon,
   LibMpvPlayback,
   LibMpvRenderSize,
   LibMpvSessionOptions,
   LibMpvSessionSnapshot,
-  LibMpvWidWindowAddon,
+  LibMpvWindowAddon,
   LoadedEmbeddedLibMpvAddon
 } from '../../src/embedded.ts'
 import type { LibMpvRuntime } from '../../src/runtime.ts'
@@ -54,7 +54,7 @@ const FAKE_RUNTIME: LibMpvRuntime = {
   runtimeDirectory: '/fake'
 }
 
-type FakeAddon<Kind extends 'iosurface-mach' | 'wid-window'> = {
+type FakeAddon<Kind extends 'layer' | 'window'> = {
   calls: AddonCall[]
   loaded: Extract<LoadedEmbeddedLibMpvAddon, { presentationKind: Kind }>
 }
@@ -145,9 +145,7 @@ function makeCore(calls: AddonCall[], overrides: FakeAddonOverrides) {
   }
 }
 
-export function makeIoSurfaceMachAddon(
-  overrides: FakeAddonOverrides = {}
-): FakeAddon<'iosurface-mach'> {
+export function makeLayerAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'layer'> {
   const calls: AddonCall[] = []
   const note =
     (method: string) =>
@@ -155,9 +153,9 @@ export function makeIoSurfaceMachAddon(
       calls.push({ method, args })
     }
 
-  const addon: LibMpvIoSurfaceMachAddon = {
+  const addon: LibMpvLayerAddon = {
     ...makeCore(calls, overrides),
-    getPresentationKind: () => 'iosurface-mach',
+    getPresentationKind: () => 'layer',
     configureFrameLink: note('configureFrameLink'),
     startPresenterLink: note('startPresenterLink'),
     stopPresenterLink: note('stopPresenterLink'),
@@ -169,10 +167,10 @@ export function makeIoSurfaceMachAddon(
     unobserveWindowOcclusion: note('unobserveWindowOcclusion')
   }
 
-  return { calls, loaded: { presentationKind: 'iosurface-mach', addon, runtime: FAKE_RUNTIME } }
+  return { calls, loaded: { presentationKind: 'layer', addon, runtime: FAKE_RUNTIME } }
 }
 
-export function makeWidWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'wid-window'> {
+export function makeWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'window'> {
   const calls: AddonCall[] = []
   const note =
     (method: string) =>
@@ -180,9 +178,9 @@ export function makeWidWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddo
       calls.push({ method, args })
     }
 
-  const addon: LibMpvWidWindowAddon = {
+  const addon: LibMpvWindowAddon = {
     ...makeCore(calls, overrides),
-    getPresentationKind: () => 'wid-window',
+    getPresentationKind: () => 'window',
     getVideoWindowHandle: (sessionId: string): number | null => {
       calls.push({ method: 'getVideoWindowHandle', args: [sessionId] })
       return overrides.getVideoWindowHandle?.(sessionId) ?? 4242
@@ -190,5 +188,5 @@ export function makeWidWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddo
     adoptVideoWindow: note('adoptVideoWindow')
   }
 
-  return { calls, loaded: { presentationKind: 'wid-window', addon, runtime: FAKE_RUNTIME } }
+  return { calls, loaded: { presentationKind: 'window', addon, runtime: FAKE_RUNTIME } }
 }

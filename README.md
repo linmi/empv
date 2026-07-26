@@ -20,7 +20,7 @@ selected at load time by `getPresentationKind()`:
 
 |             | macOS                                                                   | Windows / Linux                         |
 | ----------- | ----------------------------------------------------------------------- | --------------------------------------- |
-| kind        | `iosurface-mach`                                                        | `wid-window`                            |
+| kind        | `layer`                                                        | `window`                            |
 | video out   | `vo=libmpv`, rendered by a Rust worker into a three-slot IOSurface pool | `vo=gpu` into an app-owned child window |
 | transport   | mach frame link → main-process `CALayer` presenter                      | main process reparents the child window |
 | compositing | under **or** over the web contents (`zOrder`)                           | above the web contents                  |

@@ -34,7 +34,7 @@ pub fn is_supported() -> bool {
 }
 
 pub fn get_presentation_kind() -> &'static str {
-    "iosurface-mach"
+    "layer"
 }
 
 pub struct CreateSessionTask {

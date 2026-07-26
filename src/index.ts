@@ -9,7 +9,7 @@ export {
   type LibMpvEmbeddedCoreAddon,
   type LibMpvEmbeddedNativeAddon,
   type LibMpvFrameNotifier,
-  type LibMpvIoSurfaceMachAddon,
+  type LibMpvLayerAddon,
   type LibMpvPlayback,
   type LibMpvPresentationKind,
   type LibMpvRecordingState,
@@ -22,7 +22,7 @@ export {
   type LibMpvVideoLayerAttachOptions,
   type LibMpvVideoLayerBounds,
   type LibMpvVideoLayerZOrder,
-  type LibMpvWidWindowAddon,
+  type LibMpvWindowAddon,
   type LoadedEmbeddedLibMpvAddon,
   type NormalizedEmbeddedAddon
 } from './embedded.ts'

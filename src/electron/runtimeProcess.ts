@@ -87,12 +87,12 @@ export function startEmpvRuntimeProcess(
     if (!loadedPromise) {
       loadedPromise = loadAddon()
         .then((loaded) => {
-          // The mach frame link only exists on 'iosurface-mach'; 'wid-window'
+          // The mach frame link only exists on 'layer'; 'window'
           // renders straight into an OS window and has no link to configure. The
           // service name is injected at spawn and must be configured before any
           // session renders a pool — a missing name is a spawn misconfiguration,
           // so fail loudly rather than render blind.
-          if (loaded.presentationKind === 'iosurface-mach') {
+          if (loaded.presentationKind === 'layer') {
             const frameLinkServiceName = process.env[EMPV_FRAME_LINK_ENV_KEY]
             if (!frameLinkServiceName) {
               throw new Error(
@@ -164,12 +164,10 @@ export function startEmpvRuntimeProcess(
         // No render size at create time: the session starts unsized and only a
         // real presenter bounds update (setRenderSize) supplies one.
         sessions.add(sessionId)
-        // 'wid-window' backends own an OS video window; ship its handle so the
-        // main process can reparent it. 'iosurface-mach' has no window to adopt.
+        // 'window' backends own an OS video window; ship its handle so the
+        // main process can reparent it. 'layer' has no window to adopt.
         const videoWindowHandle =
-          loaded.presentationKind === 'wid-window'
-            ? loaded.addon.getVideoWindowHandle(sessionId)
-            : null
+          loaded.presentationKind === 'window' ? loaded.addon.getVideoWindowHandle(sessionId) : null
         return { sessionId, snapshot: addon.getSessionSnapshot(sessionId), videoWindowHandle }
       }
       case 'loadPlayback': {

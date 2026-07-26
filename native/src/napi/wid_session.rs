@@ -26,7 +26,7 @@ pub fn is_supported() -> bool {
 }
 
 pub fn get_presentation_kind() -> &'static str {
-    "wid-window"
+    "window"
 }
 
 pub struct CreateSessionTask {
