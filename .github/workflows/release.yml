@@ -115,8 +115,12 @@ jobs:
         include:
           - arch: arm64
             runner: macos-latest
+          # GitHub retired the macos-13 image, which was the last Intel runner
+          # under a plain version label; macos-15-intel is its replacement. A
+          # retired label does not fail the job -- it queues for a runner that
+          # will never come -- so a stuck x64 job means checking this first.
           - arch: x64
-            runner: macos-13
+            runner: macos-15-intel
     defaults:
       run:
         shell: bash
