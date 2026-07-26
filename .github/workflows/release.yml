@@ -21,11 +21,22 @@
 # The two macOS builds run on separate runners on purpose: build-macos-runtime
 # configures every package for the host and does not cross-compile, and it now
 # refuses an arch that is not the host's rather than mislabel the output.
+#
+# WHAT STARTS A RELEASE
+#
+# The version in package.json, and nothing else. A push to main whose version
+# has no release yet builds one; every other push does nothing. The tag is an
+# output rather than an input -- `gh release create` creates it at the released
+# commit -- which is what lets a single field decide, and also sidesteps the
+# rule that a tag pushed with GITHUB_TOKEN cannot trigger a workflow.
+#
+# So a version bump on main publishes. That is the point of it, but it does mean
+# the bump is the irreversible step, not the tag push that used to follow it.
 name: release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -42,6 +53,49 @@ concurrency:
 
 jobs:
   # ───────────────────────────────────────────────────────────────────────────
+  # Whether there is anything to do. Runs on every push to main, so it has to be
+  # cheap: no checkout of history, no toolchain, one API call.
+  # ───────────────────────────────────────────────────────────────────────────
+  decide:
+    name: decide
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Asking whether the release exists, rather than diffing package.json
+      # against the previous commit, is what makes this safe to re-run: a push
+      # that failed halfway leaves no release, so the next push retries, and a
+      # push that changed nothing else still cannot double-publish.
+      - name: Decide whether this version needs releasing
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+          if gh release view "v${version}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "v${version} is already released; nothing to do."
+            exit 0
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" != "push" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "v${version} is unreleased, but ${GITHUB_EVENT_NAME} never publishes."
+            exit 0
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "v${version} has no release: building one."
+
+  # ───────────────────────────────────────────────────────────────────────────
   # The platform-independent package: types, JS, and the source the addon is
   # built from. No native toolchain involved, so it does not need to share a
   # runner with anything that has one.
@@ -50,6 +104,10 @@ jobs:
     name: main package
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: decide
+    # Builds when there is a release to build, and on a manual run so the whole
+    # path can be exercised without publishing. Nothing else compiles anything.
+    if: needs.decide.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,21 +122,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
-
-      # A tag that disagrees with the manifest produces a release whose tarballs
-      # install under a different version than the tag promises. Catch it before
-      # anything is built rather than after it is published.
-      - name: Assert the tag matches the package version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME}"
-          if [ "$tag" != "v${version}" ]; then
-            echo "Tag ${tag} does not match package version ${version} (expected v${version})."
-            exit 1
-          fi
-          echo "tag ${tag} matches version ${version}"
 
       - name: Run the TypeScript tests and type check
         run: |
@@ -109,6 +152,10 @@ jobs:
     name: macos-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
+    needs: decide
+    # Builds when there is a release to build, and on a manual run so the whole
+    # path can be exercised without publishing. Nothing else compiles anything.
+    if: needs.decide.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -235,6 +282,10 @@ jobs:
     name: windows-x64
     runs-on: windows-latest
     timeout-minutes: 45
+    needs: decide
+    # Builds when there is a release to build, and on a manual run so the whole
+    # path can be exercised without publishing. Nothing else compiles anything.
+    if: needs.decide.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
     # pwsh, matching the compile gate. Under Git Bash the MSVC toolchain is not
     # what gets used: /usr/bin/link -- GNU coreutils' link(1) -- comes first on
     # PATH and shadows link.exe, and rustc's own build scripts fail to link with
@@ -343,8 +394,8 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   release:
     name: release
-    needs: [main-package, macos, windows]
-    if: startsWith(github.ref, 'refs/tags/') && inputs.dry_run != true
+    needs: [decide, main-package, macos, windows]
+    if: needs.decide.outputs.should_release == 'true' && inputs.dry_run != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -371,7 +422,7 @@ jobs:
       # and one that installs without an addon and fails at first use.
       - name: Write the release notes
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: v${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
@@ -416,14 +467,17 @@ jobs:
           EOF
           cat notes.md
 
+      # --target creates the tag at the commit that was built, so the tag is a
+      # record of what shipped rather than something that had to exist first.
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: v${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
           gh release create "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
             --title "${TAG}" \
             --notes-file notes.md \
             tarballs/*.tgz tarballs/SHASUMS256.txt

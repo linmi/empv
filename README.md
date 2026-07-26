@@ -328,6 +328,21 @@ the applied patch filenames, `mpv.mesonFlags` records the mpv Meson flags
 (including `-Dvideotoolbox-gl=enabled`), and `ffmpeg.configureFlags` records the
 FFmpeg configure flags.
 
+## Releasing
+
+The `version` field in `package.json` is what starts a release. Push a bump to
+`main` and the release workflow builds all three platform packages, verifies
+each one by installing it into an empty project and opening an mpv session, and
+publishes them under `v<version>` — creating the tag at the commit it built.
+
+There is no tag to push and no button to press, so **the version bump is the
+irreversible step**. A push whose version already has a release does nothing
+beyond one cheap API call, which is why re-pushing after a failed build is safe:
+it retries, and it cannot publish twice.
+
+To exercise the whole path without publishing, run the workflow manually with
+`dry_run` left on.
+
 ## License
 
 Apache-2.0 — see [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
