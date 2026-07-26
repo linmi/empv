@@ -1,6 +1,6 @@
 {
   "name": "empv",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "packageManager": "pnpm@11.7.0",
   "description": "In-process libmpv video player for Electron.",
   "keywords": [
@@ -42,9 +42,9 @@
     "./package.json": "./package.json"
   },
   "optionalDependencies": {
-    "empv-darwin-arm64": "0.3.0",
-    "empv-darwin-x64": "0.3.0",
-    "empv-win32-x64": "0.3.0"
+    "empv-darwin-arm64": "0.3.1",
+    "empv-darwin-x64": "0.3.1",
+    "empv-win32-x64": "0.3.1"
   },
   "peerDependencies": {
     "electron": ">=42"
