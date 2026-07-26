@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import type { LibMpvRenderSize } from '../src/embedded.ts'
+import type { LibMpvWindowAttachOptions } from '../src/embedded.ts'
 import {
   createEmpvFrameLinkServiceName,
-  createEmpvPlaybackHost,
-  type EmpvWindowHost
+  createEmpvPlaybackHost
 } from '../src/electron/playbackHost.ts'
 import { makeLayerAddon, makeWindowAddon } from './support/fakeAddon.ts'
 import { makeFakeRuntimeClient } from './support/fakeClient.ts'
@@ -246,30 +245,21 @@ describe('createEmpvPlaybackHost', () => {
   })
 })
 
-// A compile-time assertion, not a runtime one. tsc reports an unused suppression
-// directive when the line it guards stops being an error, so deleting the
-// narrowing that makes 'underlay' unrepresentable on this backend fails the type
-// check rather than quietly restoring the old silent-discard behaviour.
-//
-// (The prose here deliberately avoids writing that directive's name at the start
-// of a line: TypeScript reads any such comment as a directive, and an
-// explanation of one then becomes a second, unused one.)
-//
-// The addon refuses it at run time too. Both exist because they catch it at
-// different moments -- this one before the code ships, that one for a JavaScript
-// caller who never ran tsc at all.
-test('the window backend cannot be asked for an underlay presenter', () => {
-  const attachWindowPresenter = (host: EmpvWindowHost): LibMpvRenderSize =>
-    host.createPresenter('presenter-1', WINDOW_HANDLE, {
-      height: 180,
-      width: 320,
-      x: 0,
-      y: 0,
-      // 'window' composites an OS child window, which is always above the web
-      // contents; only the 'layer' backend can go beneath.
-      // @ts-expect-error zOrder 'underlay' is unrepresentable on this backend.
-      zOrder: 'underlay'
-    })
+// A compile-time assertion, not a runtime one, and stated as a type rather than
+// as a suppressed error: if 'underlay' ever becomes assignable to this backend's
+// zOrder again, Expect<false> stops satisfying its own constraint and the type
+// check fails. Writing it with a suppression directive would have asserted the
+// same thing while spending a type-safety bypass to do it.
+type Expect<T extends true> = T
 
-  assert.equal(typeof attachWindowPresenter, 'function')
+type WindowBackendRefusesUnderlay = Expect<
+  'underlay' extends LibMpvWindowAttachOptions['zOrder'] ? false : true
+>
+
+// Referenced so the type is not dead code. The addon refuses 'underlay' at run
+// time as well; the two catch it at different moments -- this one before the
+// code ships, that one for a JavaScript caller who never ran tsc at all.
+test('the window backend cannot be asked for an underlay presenter', () => {
+  const proof: WindowBackendRefusesUnderlay = true
+  assert.equal(proof, true)
 })
