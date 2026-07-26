@@ -97,6 +97,7 @@
     "prepare-runtime:windows": "node scripts/embedded-mpv/prepare-windows-runtime.mjs",
     "stage-runtime": "node scripts/embedded-mpv/stage-runtime.mjs",
     "stage-runtime:macos": "node scripts/embedded-mpv/stage-macos-runtime.mjs",
+    "benchmark:macos": "node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs",
     "smoke:windows": "node --experimental-strip-types scripts/embedded-mpv/windows-smoke.mjs",
     "typecheck": "pnpm run build && tsc --noEmit -p tsconfig.test.json",
     "test:node": "node --experimental-strip-types --test tests/*.test.ts",
