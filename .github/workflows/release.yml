@@ -260,14 +260,17 @@ jobs:
       - name: Verify the prebuilt end to end
         run: pnpm run verify:prebuilt
 
-      # Against the runtime that actually ships, which is the only place the
-      # zero-copy videotoolbox assertion means anything: it is the vendored build
-      # that carries the videotoolbox-gl patch.
+      # arm64 only. The hosted Intel runner is a VM with no media hardware at
+      # all: no VideoToolbox decode (hwdecCurrent comes back "no"), no
+      # VideoToolbox encode, and no accelerated OpenGL. Every check this makes is
+      # about hardware paths, so there is nothing for it to find there and
+      # nothing its result would mean. The arm64 runner does have VideoToolbox,
+      # which is where the zero-copy interop assertion earns its keep.
       #
-      # --invariants-only for the same reason the compile gate uses it: this is a
-      # hosted runner with no accelerated OpenGL, so the rates it produces measure
-      # the software renderer rather than the runtime.
+      # --invariants-only because even the arm64 runner renders through software
+      # OpenGL, so its frame rates measure the renderer rather than the runtime.
       - name: Measure decode, render cadence and CPU
+        if: matrix.arch == 'arm64'
         run: pnpm run benchmark:macos -- --invariants-only
 
       - name: Pack the platform package
