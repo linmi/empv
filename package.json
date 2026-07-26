@@ -2,7 +2,7 @@
   "name": "empv",
   "version": "0.3.0",
   "packageManager": "pnpm@11.7.0",
-  "description": "Embedded libmpv player for Electron: a Rust/N-API addon with a typed session contract, IOSurface/mach compositing on macOS and native child-window embedding on Windows and Linux.",
+  "description": "In-process libmpv video player for Electron.",
   "keywords": [
     "mpv",
     "libmpv",
