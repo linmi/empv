@@ -31,17 +31,30 @@ function log(message) {
   console.log(`[verify-prebuilt] ${message}`)
 }
 
-// npm and pnpm are .cmd shims on Windows, and spawnSync will not execute those:
-// it reports ENOENT, which reads as "the tool is not installed" for a tool that
-// plainly is. Naming the shim is more precise than passing shell:true, which
-// would also change how every argument is quoted.
-function resolveCommand(command) {
-  if (process.platform !== 'win32') return command
-  return command === 'npm' || command === 'pnpm' ? `${command}.cmd` : command
+// npm and pnpm are .cmd shims on Windows, and Node refuses to spawn a .cmd or
+// .bat without a shell -- the CVE-2024-27980 mitigation. Naming the shim gets
+// EINVAL, not ENOENT, so the first fix for this replaced one confusing error
+// with another.
+//
+// A shell is therefore required, and that means arguments stop being passed as
+// argv and start being parsed by cmd. Only these two commands get it, and only
+// their arguments are quoted, so nothing else in this script changes shape on
+// one platform.
+function quoteForCmd(value) {
+  return /[\s"&|<>^()]/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value
+}
+
+function spawnPlan(command, args) {
+  const isShim = process.platform === 'win32' && (command === 'npm' || command === 'pnpm')
+  return isShim
+    ? { command, args: args.map(quoteForCmd), shell: true }
+    : { command, args, shell: false }
 }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(resolveCommand(command), args, {
+  const plan = spawnPlan(command, args)
+  const result = spawnSync(plan.command, plan.args, {
+    shell: plan.shell,
     cwd: options.cwd ?? packageRoot,
     encoding: 'utf8',
     stdio: options.inherit ? 'inherit' : ['ignore', 'pipe', 'pipe']
