@@ -247,6 +247,13 @@ jobs:
           workspaces: native -> target
           key: release-win32
 
+      # Puts lib.exe on PATH, which prepare-runtime:windows uses to synthesise
+      # the import library from the DLL's exports.
+      - name: Setup MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Setup pnpm (from packageManager field)
         uses: pnpm/action-setup@v4
 
@@ -257,6 +264,25 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
+
+      # Windows cannot link against a DLL without an import library, so a libmpv
+      # has to be present at compile time even though none is shipped. It is a
+      # compile input and nothing more: only the addon leaves this job, and the
+      # step after packing asserts no DLL came with it.
+      - name: Stage the pinned libmpv as a compile input
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:RUNNER_TEMP 'libmpv-dev-prefix'
+          pnpm run prepare-runtime:windows -- $prefix
+          if ($LASTEXITCODE -ne 0) { throw "Windows runtime preparation exited $LASTEXITCODE" }
+
+          $libPath = Join-Path $prefix 'lib\mpv.lib'
+          if (-not (Test-Path $libPath)) { throw "missing $libPath" }
+
+          "LIBMPV_INCLUDE_DIR=$prefix\include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBMPV_LIBRARY_DIR=$prefix\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBMPV_IMPORT_LIB=$libPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Compile the addon
         run: |
