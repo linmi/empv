@@ -364,13 +364,20 @@ jobs:
           node-version: 22
 
       # libmpv-dev 带入运行时 libmpv.so.2（与 linux 编译端同源）；xvfb 提供 X 显示；
-      # ffmpeg 生成 fixture；libgl1-mesa-dri 提供软件 GL。libx11-6 / libxext6 已随
-      # 基础镜像与 libmpv 依赖带入，无需显式安装。
+      # ffmpeg 生成 fixture。
+      #
+      # GL 需要三样，缺一不可：libgl1-mesa-dri 是 DRI 驱动（llvmpipe 在这里），
+      # libglx-mesa0 是 GLX 的 Mesa vendor，libegl-mesa0 是 EGL 的。mpv 的 vo=gpu
+      # 依次尝试 x11egl 与 x11(GLX)，两条都起不来才会掉到 drm —— 而 runner 上没有
+      # DRM 设备，于是报 "No primary DRM device could be picked!" 并判定
+      # "Failed initializing any suitable GPU context!"。只装 DRI 驱动不够。
+      # libgbm1 是 Mesa EGL 在无显示设备下的缓冲管理依赖。
       - name: Install runtime libmpv + Xvfb + ffmpeg + software GL
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libmpv-dev xvfb ffmpeg libgl1-mesa-dri
+            libmpv-dev xvfb ffmpeg \
+            libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libgbm1
 
       # 把 linux job 编好的 .node 落回稳定的 native 输出路径；冒烟脚本用 createRequire
       # 按相对该路径（../../native/build/Release/empv.node）加载。
