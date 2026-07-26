@@ -10,7 +10,7 @@ import { LibMpvRuntimeError, assertLibMpvRuntime, resolveLibMpvRuntime } from '.
 // Fixtures describe a runtime the way a real staged one looks on disk: the addon
 // under addon/, the shared library under lib/. Names are the real artifact names
 // mpv and napi produce, not values read back out of the resolver.
-const ADDON_RELATIVE_PATH = join('addon', 'embedded_mpv.node')
+const ADDON_RELATIVE_PATH = join('addon', 'empv.node')
 const DARWIN_LIBRARY_RELATIVE_PATH = join('lib', 'libmpv.dylib')
 
 const temporaryRoots: string[] = []

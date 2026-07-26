@@ -33,7 +33,7 @@ import { normalizeEmbeddedAddon } from '../../src/embedded.ts'
 const require = createRequire(import.meta.url)
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const NATIVE_BUILD_DIR = path.resolve(scriptDir, '../../native/build/Release')
-const ADDON_PATH = path.join(NATIVE_BUILD_DIR, 'embedded_mpv.node')
+const ADDON_PATH = path.join(NATIVE_BUILD_DIR, 'empv.node')
 
 const PLAYBACK_BUDGET_MS = 20_000
 const EOF_BUDGET_MS = 20_000

@@ -16,4 +16,4 @@ This product loads, but does not include, the libmpv and FFmpeg shared
 libraries, which are licensed under the GNU Lesser General Public License,
 version 2.1 or later. They are built and distributed separately from this
 source distribution. See THIRD-PARTY-NOTICES.md for the components, their
-versions and sources, and LICENSE.LGPL-2.1 for the licence text.
+versions and sources, and third-party/LGPL-2.1.txt for the licence text.

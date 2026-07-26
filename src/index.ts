@@ -28,7 +28,7 @@ export {
 } from './embedded.ts'
 
 export {
-  LIBMPV_NATIVE_ADDON_NAME,
+  EMPV_NATIVE_ADDON_NAME,
   LIBMPV_RUNTIME_DIRECTORY_NAME,
   LibMpvRuntimeError,
   assertLibMpvRuntime,

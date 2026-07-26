@@ -57,7 +57,7 @@ export type LibMpvRuntimeResolveOptions = {
 }
 
 export const LIBMPV_RUNTIME_DIRECTORY_NAME = 'libmpv'
-export const LIBMPV_NATIVE_ADDON_NAME = 'embedded_mpv.node'
+export const EMPV_NATIVE_ADDON_NAME = 'empv.node'
 
 const RUNTIME_MANIFEST_FILE_NAME = 'runtime-manifest.json'
 const ENV_RUNTIME_DIRECTORY = 'EMPV_RUNTIME_DIR'
@@ -239,9 +239,9 @@ function getAddonCandidatePaths(
   return unique([
     env[ENV_ADDON_PATH],
     manifestAddonPath ? resolveRuntimePath(runtimeDirectory, manifestAddonPath) : null,
-    join(runtimeDirectory, 'addon', LIBMPV_NATIVE_ADDON_NAME),
-    join(runtimeDirectory, 'native', LIBMPV_NATIVE_ADDON_NAME),
-    join(runtimeDirectory, LIBMPV_NATIVE_ADDON_NAME)
+    join(runtimeDirectory, 'addon', EMPV_NATIVE_ADDON_NAME),
+    join(runtimeDirectory, 'native', EMPV_NATIVE_ADDON_NAME),
+    join(runtimeDirectory, EMPV_NATIVE_ADDON_NAME)
   ])
 }
 

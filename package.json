@@ -68,12 +68,11 @@
     "scripts",
     "third-party",
     "LICENSE",
-    "LICENSE.LGPL-2.1",
     "NOTICE",
     "THIRD-PARTY-NOTICES.md"
   ],
   "napi": {
-    "binaryName": "embedded_mpv",
+    "binaryName": "empv",
     "targets": [
       "aarch64-apple-darwin",
       "x86_64-apple-darwin",

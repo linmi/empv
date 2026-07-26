@@ -41,7 +41,7 @@ const IDLE_SNAPSHOT: LibMpvSessionSnapshot = {
 const RENDER_SIZE: LibMpvRenderSize = { heightPixels: 0, widthPixels: 0 }
 
 const FAKE_RUNTIME: LibMpvRuntime = {
-  addonPath: '/fake/embedded_mpv.node',
+  addonPath: '/fake/empv.node',
   arch: 'arm64',
   available: true,
   includeDirectory: null,

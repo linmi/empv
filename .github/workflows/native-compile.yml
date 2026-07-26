@@ -7,7 +7,7 @@ name: native compile gate
 #
 # 门禁边界（job 矩阵）：
 #   * linux / windows：覆盖「编译 + 链接」——cargo/napi 必须以 0 退出且真的产出
-#     build/Release/embedded_mpv.node（每个 job 最后一步断言产物存在）。
+#     build/Release/empv.node（每个 job 最后一步断言产物存在）。
 #   * linux-smoke：把 Linux 从「编译通过」升级为「运行时可跑」。它复用 linux job
 #     编出的 .node（经 upload/download-artifact 传递），在 xvfb-run 提供的真实 X
 #     显示下真正加载 .node、mpv_create、建窗口并驱动一段真实播放，断言
@@ -129,7 +129,7 @@ jobs:
           pnpm run lint
           pnpm run test
 
-      # 不传 --platform，确保 napi CLI 生成契约要求的 embedded_mpv.node，
+      # 不传 --platform，确保 napi CLI 生成契约要求的 empv.node，
       # 而不是带 linux-x64-gnu 后缀的分发产物。
       - name: Compile embedded mpv addon (Rust + gcc)
         run: |
@@ -142,12 +142,12 @@ jobs:
             --output-dir "${GITHUB_WORKSPACE}/native/build/Release"
 
       # 准出断言：产物必须真的生成，否则即便前一步侥幸 0 退出也判失败。
-      - name: Assert embedded_mpv.node was produced
+      - name: Assert empv.node was produced
         run: |
-          node_file="${GITHUB_WORKSPACE}/native/build/Release/embedded_mpv.node"
+          node_file="${GITHUB_WORKSPACE}/native/build/Release/empv.node"
           test -f "$node_file" || { echo "missing $node_file"; exit 1; }
-          if compgen -G "${GITHUB_WORKSPACE}/native/build/Release/embedded_mpv.*.node" > /dev/null; then
-            echo "platform-suffixed embedded_mpv artifact is forbidden"
+          if compgen -G "${GITHUB_WORKSPACE}/native/build/Release/empv.*.node" > /dev/null; then
+            echo "platform-suffixed empv artifact is forbidden"
             exit 1
           fi
           echo "produced $node_file"
@@ -158,11 +158,11 @@ jobs:
       # 只在 linux job 里维护一份，smoke job 只负责运行时关注点（xvfb、ffmpeg fixture、
       # 系统 libmpv.so.2、真正加载并驱动 .node），零编译逻辑重复。两个 job 同为
       # ubuntu-latest 同一镜像，ABI（N-API + glibc）一致，跨 runner 传 .node 安全。
-      - name: Upload embedded_mpv.node for the runtime smoke job
+      - name: Upload empv.node for the runtime smoke job
         uses: actions/upload-artifact@v4
         with:
           name: embedded-mpv-linux-node
-          path: native/build/Release/embedded_mpv.node
+          path: native/build/Release/empv.node
           if-no-files-found: error
           retention-days: 1
 
@@ -239,7 +239,7 @@ jobs:
           "LIBMPV_IMPORT_LIB=$libPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "prepared pinned libmpv compile input at $prefix"
 
-      # 不传 --platform，保持唯一产物名 embedded_mpv.node。
+      # 不传 --platform，保持唯一产物名 empv.node。
       - name: Compile embedded mpv addon (Rust + MSVC x64)
         run: |
           $ErrorActionPreference = 'Stop'
@@ -250,14 +250,14 @@ jobs:
           pnpm exec napi build --release --target x86_64-pc-windows-msvc --cwd $native --manifest-path $manifest --package-json-path $packageJson --output-dir $output
           if ($LASTEXITCODE -ne 0) { throw "napi build exited $LASTEXITCODE" }
 
-      - name: Assert embedded_mpv.node was produced
+      - name: Assert empv.node was produced
         run: |
           $ErrorActionPreference = 'Stop'
-          $nodeFile = Join-Path $env:GITHUB_WORKSPACE 'native\build\Release\embedded_mpv.node'
+          $nodeFile = Join-Path $env:GITHUB_WORKSPACE 'native\build\Release\empv.node'
           if (-not (Test-Path $nodeFile)) { throw "missing $nodeFile" }
-          $suffixed = Get-ChildItem (Split-Path $nodeFile) -Filter 'embedded_mpv.*.node'
+          $suffixed = Get-ChildItem (Split-Path $nodeFile) -Filter 'empv.*.node'
           if ($suffixed) {
-            throw "platform-suffixed embedded_mpv artifact is forbidden: $($suffixed.Name -join ', ')"
+            throw "platform-suffixed empv artifact is forbidden: $($suffixed.Name -join ', ')"
           }
           Write-Host "produced $nodeFile"
           Get-Item $nodeFile | Format-List FullName, Length
@@ -271,7 +271,7 @@ jobs:
   # flag 的不变量。不 meson/ninja、不编译、不建窗口——纯 Node + curl/tar/patch。
   #
   # 为什么仍做完整 pnpm install：在无 node_modules 的干净检出上直接
-  # `pnpm run run <script>`，pnpm 会在跑脚本前隐式对整个工作区
+  # `pnpm run <script>`，pnpm 会在跑脚本前隐式对整个工作区
   # 装一遍（含原生模块 postinstall）。与其放任隐式安装，不如显式安装：
   # 走 pnpm store 缓存、且 lockfile 失同步时显性失败。脚本本身零外部依赖。
   #
@@ -316,7 +316,7 @@ jobs:
 
       # 核心门禁：dry-run vendored patch + 校验 meson 选项 / build flag 不变量。
       - name: Dry-run vendored mpv runtime patches
-        run: pnpm run run verify:runtime-patches
+        run: pnpm run verify:runtime-patches
 
   # ───────────────────────────────────────────────────────────────────────────
   # linux-smoke：Linux 运行时冒烟（本轮主目标）。把 Linux 从「编译通过」升级为
@@ -373,8 +373,8 @@ jobs:
             libmpv-dev xvfb ffmpeg libgl1-mesa-dri
 
       # 把 linux job 编好的 .node 落回稳定的 native 输出路径；冒烟脚本用 createRequire
-      # 按相对该路径（../../native/build/Release/embedded_mpv.node）加载。
-      - name: Download the freshly compiled embedded_mpv.node
+      # 按相对该路径（../../native/build/Release/empv.node）加载。
+      - name: Download the freshly compiled empv.node
         uses: actions/download-artifact@v4
         with:
           name: embedded-mpv-linux-node
@@ -382,7 +382,7 @@ jobs:
 
       - name: Assert the downloaded addon exists
         run: |
-          node_file="${GITHUB_WORKSPACE}/native/build/Release/embedded_mpv.node"
+          node_file="${GITHUB_WORKSPACE}/native/build/Release/empv.node"
           test -f "$node_file" || { echo "missing $node_file"; exit 1; }
           ls -la "$node_file"
 

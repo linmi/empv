@@ -497,7 +497,7 @@ function normalizeEmbeddedMpvPlatform(value) {
 function validatePackagedEmbeddedMpv(resourceDir, options = {}) {
   const platform = normalizeEmbeddedMpvPlatform(options.platform)
   const unpackedNativeDir = options.nativeDir ?? path.join(resourceDir, 'libmpv', 'native')
-  const addonPath = path.join(unpackedNativeDir, 'embedded_mpv.node')
+  const addonPath = path.join(unpackedNativeDir, 'empv.node')
   const libDir = path.join(unpackedNativeDir, 'lib')
   const manifestPath = path.join(unpackedNativeDir, 'runtime-manifest.json')
   const errors = []

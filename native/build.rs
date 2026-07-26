@@ -66,7 +66,7 @@ fn build_macos_shims() {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-arg={deployment_flag}");
-    println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@loader_path/embedded_mpv.node");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@loader_path/empv.node");
     if let Some(runtime_rpath) = library.runtime_rpath {
         println!(
             "cargo:rustc-link-arg=-Wl,-rpath,{}",

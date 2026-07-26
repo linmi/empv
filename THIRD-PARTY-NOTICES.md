@@ -48,7 +48,7 @@ in `runtime-manifest.json` under `packages.<name>.sourceUrl` /
 FFmpeg configure flags. That manifest — not this table — is the authoritative
 record for any given binary you ship.
 
-The full text of the LGPL-2.1 is in `LICENSE.LGPL-2.1`.
+The full text of the LGPL-2.1 is in `third-party/LGPL-2.1.txt`.
 
 ### 2.1 How the LGPL is satisfied
 
@@ -71,7 +71,7 @@ the work that uses them. empv satisfies this by construction:
    runtime from those exact inputs.
 
 If you redistribute a binary that bundles this runtime, you must ship with it:
-the LGPL-2.1 text (`LICENSE.LGPL-2.1`), this notice, the build's
+the LGPL-2.1 text (`third-party/LGPL-2.1.txt`), this notice, the build's
 `runtime-manifest.json`, the local patches under
 `scripts/embedded-mpv/patches/`, and either the corresponding source archives or
 a written offer to supply them. `runtime-manifest.json` carries a

@@ -74,7 +74,7 @@ for bundled resources under common app roots:
 ```text
 resources/libmpv/darwin-arm64/
   runtime-manifest.json
-  addon/embedded_mpv.node
+  addon/empv.node
   lib/libmpv.dylib
   include/mpv/client.h
 ```
@@ -86,7 +86,7 @@ Development overrides:
 
 ```text
 EMPV_RUNTIME_DIR=/absolute/path/to/runtime
-EMPV_ADDON_PATH=/absolute/path/to/embedded_mpv.node
+EMPV_ADDON_PATH=/absolute/path/to/empv.node
 EMPV_LIBRARY_PATH=/absolute/path/to/libmpv.dylib
 ```
 
@@ -313,4 +313,4 @@ and remain under the MIT License; its notices are preserved in
 The libmpv/FFmpeg runtime empv loads is LGPL-2.1-or-later and is **not** covered
 by the Apache licence. If you redistribute a build that bundles it, read
 [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) and
-[`LICENSE.LGPL-2.1`](./LICENSE.LGPL-2.1).
+[`third-party/LGPL-2.1.txt`](./third-party/LGPL-2.1.txt).

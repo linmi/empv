@@ -157,7 +157,7 @@ only; it is deliberately marked `ci-compile-input` and must not be packaged as
 an LGPL release runtime.
 
 After compiling the addon and placing the prepared `libmpv-2.dll` beside
-`embedded_mpv.node`, validate the real addon, Win32 presenter, playback,
+`empv.node`, validate the real addon, Win32 presenter, playback,
 EOF/replay, and playlist behavior with:
 
 ```powershell

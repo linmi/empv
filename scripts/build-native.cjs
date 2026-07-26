@@ -15,7 +15,7 @@ const packageRoot = path.resolve(__dirname, '..')
 const workspaceRoot = path.resolve(packageRoot, '..', '..')
 const addonRoot = path.join(packageRoot, 'native')
 const outputDir = path.join(addonRoot, 'build', 'Release')
-const outputFile = path.join(outputDir, 'embedded_mpv.node')
+const outputFile = path.join(outputDir, 'empv.node')
 const outputLibDir = path.join(outputDir, 'lib')
 const distNativeDir = path.join(packageRoot, 'dist', 'native')
 const unavailableMarkerFile = path.join(outputDir, 'embedded-mpv-unavailable.txt')
@@ -56,7 +56,7 @@ function cleanOutput() {
   fs.rmSync(outputFile, { force: true })
   if (fs.existsSync(outputDir)) {
     for (const entry of fs.readdirSync(outputDir)) {
-      if (/^embedded_mpv\..+\.node$/.test(entry)) {
+      if (/^empv\..+\.node$/.test(entry)) {
         fs.rmSync(path.join(outputDir, entry), { force: true })
       }
     }
@@ -339,7 +339,7 @@ function runNapiBuild(env) {
 
   const suffixedOutputs = fs
     .readdirSync(outputDir)
-    .filter((entry) => /^embedded_mpv\..+\.node$/.test(entry))
+    .filter((entry) => /^empv\..+\.node$/.test(entry))
   if (suffixedOutputs.length > 0) {
     throw new Error(
       `napi build produced forbidden platform-suffixed output: ${suffixedOutputs.join(', ')}.`

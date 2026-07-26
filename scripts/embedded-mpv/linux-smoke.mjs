@@ -8,7 +8,7 @@
 //   xvfb-run -a node --experimental-strip-types \
 //     scripts/embedded-mpv/linux-smoke.mjs <fixture.mp4>
 //
-// It loads build/Release/embedded_mpv.node DIRECTLY (not through the staged
+// It loads build/Release/empv.node DIRECTLY (not through the staged
 // runtime resolver in src/runtime.ts), validates it with the real TypeScript
 // contract normalizer, and drives a real mpv playback of a tiny generated
 // fixture through initial playback, EOF, restart, and playlist behavior.
@@ -41,8 +41,8 @@ import { normalizeEmbeddedAddon } from '../../src/embedded.ts'
 const require = createRequire(import.meta.url)
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 
-// scripts/embedded-mpv/ -> ../../native/build/Release/embedded_mpv.node
-const ADDON_PATH = path.resolve(scriptDir, '../../native/build/Release/embedded_mpv.node')
+// scripts/embedded-mpv/ -> ../../native/build/Release/empv.node
+const ADDON_PATH = path.resolve(scriptDir, '../../native/build/Release/empv.node')
 
 // Total wall-clock budget for reaching 'playing' AND position >= 1s. The job
 // itself is capped at ~15 min; this is the inner, meaningful playback budget.
