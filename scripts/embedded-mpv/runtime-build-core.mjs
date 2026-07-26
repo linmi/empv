@@ -140,7 +140,23 @@ export function downloadSources({ sourcePackages, archiveRoot, sourceRoot, sourc
     if (!fs.existsSync(archivePath)) {
       run(
         'curl',
-        ['-fL', '--retry', '3', '--retry-delay', '5', '-o', archivePath, sourcePackage.url],
+        // --retry-all-errors, because plain --retry only covers transient HTTP
+        // statuses and timeouts. A TLS handshake that fails (curl exit 35) is
+        // neither, and it is what took down a release build fetching
+        // ffmpeg.org: one flaky handshake against an upstream mirror, no retry,
+        // an hour of compilation thrown away. Five attempts because these are
+        // seven fetches from six hosts and any of them can have a bad minute.
+        [
+          '-fL',
+          '--retry',
+          '5',
+          '--retry-delay',
+          '5',
+          '--retry-all-errors',
+          '-o',
+          archivePath,
+          sourcePackage.url
+        ],
         {
           env
         }
