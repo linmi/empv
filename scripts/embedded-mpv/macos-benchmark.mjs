@@ -7,6 +7,7 @@
 //   node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs
 //   node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs --json
 //   node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs --strict
+//   node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs --invariants-only
 //
 // WHAT IS AND IS NOT MEASURED
 //
@@ -295,6 +296,17 @@ async function measureCase(addon, testCase, fixture) {
 // there the machine is measuring the artefact that ships, and a flake is worth a
 // re-run.
 const STRICT = process.argv.includes('--strict')
+// For machines that cannot measure throughput at all. GitHub's hosted macOS
+// runners are the case this exists for: they have no accelerated OpenGL pixel
+// format -- the CGL setup falls back to the software renderer, and mpv itself says
+// so ("Suspected software renderer or indirect context") -- and 1080p60 comes out
+// at under three frames a second. VideoToolbox still decodes in hardware there,
+// so the invariants are all still meaningful; only the rates are not.
+//
+// A flag rather than autodetection. Whether the renderer is accelerated is not
+// exposed through the addon, and quietly dropping assertions when a heuristic
+// fires is how a gate stops testing what its name says it tests.
+const INVARIANTS_ONLY = process.argv.includes('--invariants-only')
 // Under 1% of the frames actually rendered. At 60fps over ten seconds that is
 // six frames, which no continuous fault stays under.
 const DROPPED_FRAME_BUDGET = 0.01
@@ -324,13 +336,31 @@ function assertHealthy(result, testCase) {
         : '')
   )
 
+  if (INVARIANTS_ONLY) {
+    log(
+      `${result.id}: throughput not asserted (--invariants-only): ` +
+        `${result.renderedFps}fps rendered, ${result.droppedFrames} dropped`
+    )
+    return
+  }
+
   // Dropped frames during steady-state playback of a file the machine can
   // decode are the definition of not keeping up. Measurement, not invariant.
-  const droppedBudget = STRICT ? 0 : Math.floor(result.framesRendered * DROPPED_FRAME_BUDGET)
+  //
+  // The budget is a fraction of the frames that SHOULD have arrived, not of the
+  // ones that did. Sizing it to the latter collapses it to zero exactly when
+  // rendering collapses, which is how this first reported "dropped 286 of 27
+  // frames (budget 0)" -- true, but a sentence that has to be decoded before it
+  // can be read.
+  const expectedFrames = result.framesRendered + result.droppedFrames
+  const droppedBudget = STRICT ? 0 : Math.floor(expectedFrames * DROPPED_FRAME_BUDGET)
   assert.ok(
     result.droppedFrames <= droppedBudget,
-    `${result.id}: dropped ${result.droppedFrames} of ${result.framesRendered} frames ` +
-      `(budget ${droppedBudget}${STRICT ? ', --strict' : ''})`
+    `${result.id}: dropped ${result.droppedFrames} of ${expectedFrames} expected frames ` +
+      `(budget ${droppedBudget}${STRICT ? ', --strict' : ''}). ` +
+      'If this machine has no accelerated OpenGL, mpv logs "Suspected software ' +
+      'renderer or indirect context" and rates here are meaningless: use ' +
+      '--invariants-only.'
   )
 
   // The pool must actually be driven. A session that renders nothing still
@@ -408,8 +438,9 @@ async function main() {
     console.log(JSON.stringify({ platform: process.platform, results }, null, 2))
   }
   log(
-    `PASS${STRICT ? ' (strict)' : ''}: every case used the zero-copy interop and kept up ` +
-      'with its source.'
+    INVARIANTS_ONLY
+      ? 'PASS (invariants only): every case used the zero-copy interop; rates were reported, not asserted.'
+      : `PASS${STRICT ? ' (strict)' : ''}: every case used the zero-copy interop and kept up with its source.`
   )
 }
 

@@ -260,8 +260,12 @@ jobs:
       # Against the runtime that actually ships, which is the only place the
       # zero-copy videotoolbox assertion means anything: it is the vendored build
       # that carries the videotoolbox-gl patch.
+      #
+      # --invariants-only for the same reason the compile gate uses it: this is a
+      # hosted runner with no accelerated OpenGL, so the rates it produces measure
+      # the software renderer rather than the runtime.
       - name: Measure decode, render cadence and CPU
-        run: pnpm run benchmark:macos -- --strict
+        run: pnpm run benchmark:macos -- --invariants-only
 
       - name: Pack the platform package
         run: |

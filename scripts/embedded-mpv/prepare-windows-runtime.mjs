@@ -127,7 +127,7 @@ function main() {
   cpSync(includeDirectory, outputIncludeDirectory, { recursive: true })
   cpSync(dllPath, outputDllPath)
 
-  const { importLibraryPath } = createMsvcImportLibrary({
+  const { importLibraryPath, exportCount } = createMsvcImportLibrary({
     dllPath: outputDllPath,
     outputLibraryDirectory
   })
@@ -153,7 +153,7 @@ function main() {
 
   rmSync(workDirectory, { recursive: true, force: true })
   console.log(`Prepared Windows libmpv compile input at ${prefix}`)
-  console.log(`Parsed ${exports.length} exports and generated ${importLibraryPath}`)
+  console.log(`Parsed ${exportCount} exports and generated ${importLibraryPath}`)
 }
 
 try {

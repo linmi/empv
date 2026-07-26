@@ -369,11 +369,13 @@ jobs:
       - name: Run the macOS runtime smoke
         run: node --experimental-strip-types scripts/embedded-mpv/macos-smoke.mjs
 
-      # 测的是这个 job 编出来的 addon 配 Homebrew 的 libmpv，不是发布件。断言是
-      # 属性而非阈值（硬解在用、零丢帧、渲染速率跟上文件自身帧率、快照合并预算），
-      # 所以在 runner 上依然成立；绝对数字受同机负载影响，只作跨运行对比。
+      # --invariants-only：托管 macOS runner 没有可加速的 OpenGL 像素格式，CGL 回退到
+      # 软件渲染器（mpv 自己会报 "Suspected software renderer or indirect context"），
+      # 1080p60 实测不到 3fps。VideoToolbox 仍在硬解，所以「选了哪个解码器、帧是否
+      # 到达 notifier、快照合并预算」这些不变量在这里依然成立且有意义；速率只打印
+      # 不断言。吞吐要真数字得在有加速 GL 的机器上跑（本地或自托管 runner）。
       - name: Measure decode, render cadence and CPU
-        run: pnpm run benchmark:macos
+        run: pnpm run benchmark:macos -- --invariants-only
 
   # ───────────────────────────────────────────────────────────────────────────
   # runtime-patches：vendored mpv patch 的 dry-run 门禁（相对编译 job 而言的快 job）。
