@@ -1,0 +1,62 @@
+# mpv-videotoolbox-gl-without-cocoa.patch
+#
+# Target: mpv 0.41.0 (pinned in build-macos-runtime.mjs), file meson.build.
+# Applied by build-macos-runtime.mjs with `patch -p1` from the extracted mpv
+# source root after the tarball is unpacked.
+#
+# WHAT THIS PATCHES
+#   1. Relaxes the build-time requirement for the `videotoolbox-gl` feature.
+#      Upstream (meson.build) gates it behind `gl-cocoa or ios-gl`. Our runtime
+#      builds with -Dcocoa=disabled -Dgl-cocoa=disabled -Dplain-gl=enabled, so
+#      neither feature resolves and videotoolbox-gl silently disables, dropping
+#      video/out/hwdec/hwdec_mac_gl.c from the build. This adds `features['gl']`
+#      (satisfied by plain-gl) as an acceptable predicate.
+#   2. Links OpenGL, IOSurface, and CoreVideo Apple frameworks in the same block
+#      that compiles hwdec_mac_gl.c. That file makes DIRECT calls to
+#      CGLGetCurrentContext / CGLTexImageIOSurface2D / CGLErrorString (OpenGL),
+#      IOSurfaceGet*OfPlane (IOSurface), and CVPixelBufferGetIOSurface
+#      (CoreVideo). Upstream only pulls OpenGL.framework in via the gl-cocoa
+#      dependency (`dependencies += GL`), which is absent here, so without this
+#      the interop object fails to link. VideoToolbox decode itself is provided
+#      by ffmpeg (--enable-videotoolbox), so VideoToolbox.framework is not
+#      linked by mpv.
+#
+# WHY IT IS SAFE / MINIMAL
+#   hwdec_mac_gl.c's runtime gate only needs ra_is_gl, GL version >= 300, and a
+#   current CGL context (CGLGetCurrentContext() != NULL) -- all satisfied by the
+#   offscreen CGL core-3.2 context the embedded render backend creates. It has no
+#   Cocoa/AppKit/Swift dependency. This patch touches only the videotoolbox-gl
+#   requirement and its source/framework wiring; nothing else.
+#
+# REMOVAL CONDITION (delete this patch and drop -Dvideotoolbox-gl=enabled when
+# either is true):
+#   - Upstream mpv relaxes the videotoolbox-gl dependency so the GL interop no
+#     longer requires gl-cocoa/ios-gl (e.g. accepts plain-gl on macOS), OR
+#   - The embedded runtime moves off the OpenGL render API (e.g. to the
+#     libplacebo/Vulkan videotoolbox-pl path), making hwdec_mac_gl.c irrelevant.
+#
+--- a/meson.build
++++ b/meson.build
+@@ -1500,8 +1500,8 @@
+ endif
+
+ videotoolbox_gl = get_option('videotoolbox-gl').require(
+-    features['gl-cocoa'] or features['ios-gl'],
+-    error_message: 'gl-cocoa nor ios-gl could be found!',
++    features['gl-cocoa'] or features['ios-gl'] or features['gl'],
++    error_message: 'gl-cocoa, ios-gl, nor plain gl could be found!',
+ )
+ features += {'videotoolbox-gl': videotoolbox_gl.allowed()}
+ corevideo = dependency('appleframeworks', modules: ['CoreVideo'], required:
+@@ -1516,6 +1516,11 @@
+ endif
+ if features['videotoolbox-gl']
+     sources += files('video/out/hwdec/hwdec_mac_gl.c')
++    # hwdec_mac_gl.c makes direct CGL/IOSurface/CoreVideo calls; upstream only
++    # links these via the gl-cocoa dependency. Link them here so the zero-copy
++    # VideoToolbox<->OpenGL interop builds without the Cocoa/Swift stack.
++    dependencies += dependency('appleframeworks',
++                               modules: ['OpenGL', 'IOSurface', 'CoreVideo'])
+ endif
+ if features['videotoolbox-pl']
+     dependencies += corevideo

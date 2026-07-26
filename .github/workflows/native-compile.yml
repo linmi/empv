@@ -1,0 +1,409 @@
+name: native compile gate
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 门禁目的（core mission）：
+#   native 的 Rust 播放核心与 Windows / Linux 原生窗口 shim
+#   需要在目标平台真实编译、链接，并由 Linux smoke 驱动完整播放契约。
+#
+# 门禁边界（job 矩阵）：
+#   * linux / windows：覆盖「编译 + 链接」——cargo/napi 必须以 0 退出且真的产出
+#     build/Release/embedded_mpv.node（每个 job 最后一步断言产物存在）。
+#   * linux-smoke：把 Linux 从「编译通过」升级为「运行时可跑」。它复用 linux job
+#     编出的 .node（经 upload/download-artifact 传递），在 xvfb-run 提供的真实 X
+#     显示下真正加载 .node、mpv_create、建窗口并驱动一段真实播放，断言
+#     'wid-window' 会话契约（见该 job 内注释）。Windows 运行时由独立的
+#     libmpv-windows-interactive.yml 在登录桌面的自托管 runner 上覆盖，机器离线
+#     不影响本 hosted compile workflow 的结论。
+#   * runtime-patches：verify:runtime-patches 的 dry-run 门禁——下载 pinned mpv
+#     源码，patch --forward --dry-run 校验 vendored patch，并断言 meson 选项 +
+#     构建脚本 flag 的不变量。不编译、不 meson/ninja、不建窗口。
+#   * 仍不覆盖：Wayland。Electron BrowserWindow presenter 重投与 Windows
+#     原生显示器像素验证归独立 interactive workflow。
+#
+# 为什么直接驱动 napi build，而不是 pnpm build:native：
+#   scripts/build-native.cjs 的 resolveRuntime() 只认 vendor/
+#   embedded-mpv/<platform>-<arch> 下 staged 的 vendored LGPL 运行时；CI 没有它时
+#   该脚本会「软失败」跳过构建（除非 EMPV_REQUIRE=1，但那样是因「找不到
+#   运行时」而报错，不是编译错误）。门禁必须在**编译错误**上硬失败，所以这里绕过
+#   build-native.cjs，用系统 / pinned 的 libmpv 库 + Windows 导入库，直接跑
+#   `napi build`，让任何 Rust、shim 编译或链接错误以非 0 退出码暴露。
+#
+# napi-rs 只使用稳定 N-API，不依赖 Electron/V8 私有 ABI；CI 的 Node 22 足以覆盖
+# addon 与平台 shim 的完整编译面。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 路径过滤是 workflow 级（不是 job 级）：新增 scripts/embedded-mpv/** 后，改动这些
+# 脚本（verify-patches / runtime-pins / linux-smoke 等）会触发**全部** job，包括
+# 较贵的 Windows MSVC 编译。这是刻意取舍——linux-smoke 与 runtime-patches 正是这些
+# 脚本的运行时门禁，编译 job 一同重跑成本可接受；不引入 dorny/paths-filter 这类
+# 逐 job 过滤的额外机制。
+# 公开仓库的标准托管 runner 不计费，所以门禁在 main 推送和 PR 上都真正执行，
+# 而不是只留一个手动入口。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一 ref 的新推送取消仍在跑的旧编译（Windows MSVC 编译较贵）。
+concurrency:
+  group: native-compile-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Linux：用发行版自带的 libmpv-dev 提供 <mpv/client.h> 与 libmpv.so，
+  # libx11-dev / libxext-dev 提供 native_window_x11.cc 需要的
+  # <X11/Xlib.h> 与 <X11/extensions/shape.h>（build.rs 链接 -lmpv -lX11 -lXext）。
+  # ───────────────────────────────────────────────────────────────────────────
+  linux:
+    name: linux (ubuntu-latest, gcc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native -> target
+
+      # build-essential（gcc/g++）已预装；这里只补 libmpv/X11 的开发头与库，
+      # 以及 pkg-config 用于解析路径。
+      - name: Install libmpv + X11 development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libmpv-dev libx11-dev libxext-dev
+
+      # 不传 version：pnpm/action-setup@v4 读根 package.json 的 packageManager
+      # 字段（pnpm@11.7.0），单一事实源。
+      - name: Setup pnpm (from packageManager field)
+        uses: pnpm/action-setup@v4
+
+      # 不开 setup-node 的 pnpm store 缓存：那要求仓库里有 pnpm-lock.yaml，而这个
+      # 仓库是 monorepo 中 packages/empv 的投影，依赖解析的权威副本在那边的根
+      # lockfile 里。在这里再放一份只会分叉，而且下一次同步就会把它删掉。
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 安装 napi CLI 等构建依赖。仓库不提交 lockfile：empv 是库，产物由
+      # cargo/napi 决定，锁 devDependencies 只会让 CI 与使用者环境更不一致。
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # 用 pkg-config 解析系统 libmpv 的头目录与库目录，避免硬编码 multiarch 路径；
+      # 随后校验 <mpv/client.h> 与 libmpv.so 确实存在，缺失即显性失败。
+      # LIBMPV_LIBRARY_DIR 由 build.rs 用于 Rust addon 的链接搜索路径；
+      # include 路径继续校验开发包完整性。
+      - name: Resolve system libmpv paths
+        run: |
+          set -euo pipefail
+          pkg-config --exists mpv
+          LIBMPV_INCLUDE_DIR="$(pkg-config --variable=includedir mpv)"
+          LIBMPV_LIBRARY_DIR="$(pkg-config --variable=libdir mpv)"
+          test -f "${LIBMPV_INCLUDE_DIR}/mpv/client.h" \
+            || { echo "missing ${LIBMPV_INCLUDE_DIR}/mpv/client.h"; exit 1; }
+          test -e "${LIBMPV_LIBRARY_DIR}/libmpv.so" \
+            || { echo "missing ${LIBMPV_LIBRARY_DIR}/libmpv.so"; exit 1; }
+          echo "LIBMPV_INCLUDE_DIR=${LIBMPV_INCLUDE_DIR}" >> "$GITHUB_ENV"
+          echo "LIBMPV_LIBRARY_DIR=${LIBMPV_LIBRARY_DIR}" >> "$GITHUB_ENV"
+          echo "resolved libmpv include=${LIBMPV_INCLUDE_DIR} lib=${LIBMPV_LIBRARY_DIR}"
+
+      - name: Check Rust formatting, lint, and tests
+        run: |
+          pnpm run lint
+          pnpm run test
+
+      # 不传 --platform，确保 napi CLI 生成契约要求的 embedded_mpv.node，
+      # 而不是带 linux-x64-gnu 后缀的分发产物。
+      - name: Compile embedded mpv addon (Rust + gcc)
+        run: |
+          pnpm exec napi build \
+            --release \
+            --target x86_64-unknown-linux-gnu \
+            --cwd "${GITHUB_WORKSPACE}/native" \
+            --manifest-path "${GITHUB_WORKSPACE}/native/Cargo.toml" \
+            --package-json-path "${GITHUB_WORKSPACE}/package.json" \
+            --output-dir "${GITHUB_WORKSPACE}/native/build/Release"
+
+      # 准出断言：产物必须真的生成，否则即便前一步侥幸 0 退出也判失败。
+      - name: Assert embedded_mpv.node was produced
+        run: |
+          node_file="${GITHUB_WORKSPACE}/native/build/Release/embedded_mpv.node"
+          test -f "$node_file" || { echo "missing $node_file"; exit 1; }
+          if compgen -G "${GITHUB_WORKSPACE}/native/build/Release/embedded_mpv.*.node" > /dev/null; then
+            echo "platform-suffixed embedded_mpv artifact is forbidden"
+            exit 1
+          fi
+          echo "produced $node_file"
+          ls -la "$node_file"
+
+      # 把编好的 .node 交给 linux-smoke job 运行时使用。选择「上传产物 + 下游下载」
+      # 而不是在 smoke job 内重新编译：编译步骤（apt 头文件、pnpm install、cargo/napi）
+      # 只在 linux job 里维护一份，smoke job 只负责运行时关注点（xvfb、ffmpeg fixture、
+      # 系统 libmpv.so.2、真正加载并驱动 .node），零编译逻辑重复。两个 job 同为
+      # ubuntu-latest 同一镜像，ABI（N-API + glibc）一致，跨 runner 传 .node 安全。
+      - name: Upload embedded_mpv.node for the runtime smoke job
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-mpv-linux-node
+          path: native/build/Release/embedded_mpv.node
+          if-no-files-found: error
+          retention-days: 1
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Windows：runner 不带 libmpv 开发包，需下载 pinned 的 mpv winbuild dev 包。
+  #
+  # 为什么 pin 到具体日期版本：mpv 官方不发布 Windows 版 libmpv 开发包，社区
+  # winbuild（zhongfly/mpv-winbuild、shinchiro/mpv-winbuild-cmake）以每日 git
+  # 快照发布，无「0.41.0」这种版本 tag。为可复现，这里 pin 到某一具体每日发布的
+  # 精确资产名，并校验 SHA256。pin 只定义在 runtime-pins.mjs，由 hosted compile
+  # 与 interactive Windows workflow 共用。选定包的 MPV_CLIENT_API_VERSION = 2.5，
+  # 本 addon 用到的 mpv_* API 早在 0.29 就已稳定，故编译面充分。
+  #
+  # 该 dev 包内容：include/mpv/*.h + libmpv.dll.a（MinGW 导入库）+ libmpv-2.dll，
+  # **没有** .def、也**没有** MSVC 的 mpv.lib。MSVC 链接器无法可靠消费 MinGW 的
+  # .dll.a，而 build.rs 要求 LIBMPV_IMPORT_LIB 指向 COFF 格式的 mpv.lib，
+  # 所以这里从 DLL 导出表用 dumpbin 生成 .def，再用 lib 生成 x64 的 mpv.lib。
+  # ───────────────────────────────────────────────────────────────────────────
+  windows:
+    name: windows (windows-latest, MSVC x64)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native -> target
+
+      # 让 dumpbin / lib（生成 mpv.lib 用）进入 PATH，并选定 x64 工具链。
+      - name: Setup MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup pnpm (from packageManager field)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 同 linux job。
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # 下载、SHA256、DLL 名与 COFF import library 生成全部由仓库脚本负责；
+      # interactive Windows 门禁复用同一脚本和 runtime-pins.mjs，避免两套 pin 漂移。
+      - name: Fetch and stage pinned libmpv Windows dev package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:RUNNER_TEMP 'libmpv-dev-prefix'
+          pnpm run prepare-runtime:windows -- $prefix
+          if ($LASTEXITCODE -ne 0) { throw "Windows runtime preparation exited $LASTEXITCODE" }
+
+          $header = Join-Path $prefix 'include\mpv\client.h'
+          $dll = Join-Path $prefix 'bin\libmpv-2.dll'
+          $libPath = Join-Path $prefix 'lib\mpv.lib'
+          if (-not (Test-Path $header)) { throw "missing $header" }
+          if (-not (Test-Path $dll)) { throw "missing $dll" }
+          if (-not (Test-Path $libPath)) { throw "missing $libPath" }
+
+          "LIBMPV_INCLUDE_DIR=$prefix\include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBMPV_LIBRARY_DIR=$prefix\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBMPV_IMPORT_LIB=$libPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "prepared pinned libmpv compile input at $prefix"
+
+      # 不传 --platform，保持唯一产物名 embedded_mpv.node。
+      - name: Compile embedded mpv addon (Rust + MSVC x64)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $native = Join-Path $env:GITHUB_WORKSPACE 'native'
+          $manifest = Join-Path $native 'Cargo.toml'
+          $packageJson = Join-Path $env:GITHUB_WORKSPACE 'package.json'
+          $output = Join-Path $native 'build\Release'
+          pnpm exec napi build --release --target x86_64-pc-windows-msvc --cwd $native --manifest-path $manifest --package-json-path $packageJson --output-dir $output
+          if ($LASTEXITCODE -ne 0) { throw "napi build exited $LASTEXITCODE" }
+
+      - name: Assert embedded_mpv.node was produced
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nodeFile = Join-Path $env:GITHUB_WORKSPACE 'native\build\Release\embedded_mpv.node'
+          if (-not (Test-Path $nodeFile)) { throw "missing $nodeFile" }
+          $suffixed = Get-ChildItem (Split-Path $nodeFile) -Filter 'embedded_mpv.*.node'
+          if ($suffixed) {
+            throw "platform-suffixed embedded_mpv artifact is forbidden: $($suffixed.Name -join ', ')"
+          }
+          Write-Host "produced $nodeFile"
+          Get-Item $nodeFile | Format-List FullName, Length
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # runtime-patches：vendored mpv patch 的 dry-run 门禁（相对编译 job 而言的快 job）。
+  # scripts/embedded-mpv/verify-patches.mjs 下载 pinned mpv 源码 tar 包，对
+  # patches/ 下每个 patch 跑 `patch -p1 --forward --dry-run`（--forward 关键：
+  # 阻止 patch 自作主张反向套用，从而把「上游已放宽依赖、patch 现已冗余」显性暴露成
+  # 非 0），并断言 meson 选项（videotoolbox-gl）+ build-macos-runtime.mjs 仍传对应
+  # flag 的不变量。不 meson/ninja、不编译、不建窗口——纯 Node + curl/tar/patch。
+  #
+  # 为什么仍做完整 pnpm install：在无 node_modules 的干净检出上直接
+  # `pnpm run run <script>`，pnpm 会在跑脚本前隐式对整个工作区
+  # 装一遍（含原生模块 postinstall）。与其放任隐式安装，不如显式安装：
+  # 走 pnpm store 缓存、且 lockfile 失同步时显性失败。脚本本身零外部依赖。
+  #
+  # 缓存：脚本每次下载 ~1-2MB 的 mpv 源码 tar 包。verify-patches.mjs 认
+  # EMPV_BUILD_ROOT（arch 无关缓存根，见 runtime-pins.mjs runtimeBuildRoot），
+  # 下载落到 <root>/archives 并优先复用。这里用 actions/cache 持久化该目录，key 绑定
+  # runtime-pins.mjs 哈希——版本/URL 一改，key 失效并自动重下。
+  # ───────────────────────────────────────────────────────────────────────────
+  runtime-patches:
+    name: runtime patches (ubuntu-latest, dry-run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      # arch 无关的下载缓存根，交给 actions/cache 持久化。
+      EMPV_BUILD_ROOT: ${{ github.workspace }}/.mpv-runtime-cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm (from packageManager field)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # patch / tar / curl 均为 ubuntu-latest 预装，无需 apt 安装系统工具。
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # 缓存 pinned mpv 源码 tar 包（EMPV_BUILD_ROOT/archives 下）。首个 run
+      # 为 miss，脚本下载后由 post-job 存入；后续 run 命中即复用，零网络。
+      - name: Cache pinned mpv source archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.EMPV_BUILD_ROOT }}/archives
+          key: mpv-source-${{ runner.os }}-${{ hashFiles('scripts/embedded-mpv/runtime-pins.mjs') }}
+
+      # 核心门禁：dry-run vendored patch + 校验 meson 选项 / build flag 不变量。
+      - name: Dry-run vendored mpv runtime patches
+        run: pnpm run run verify:runtime-patches
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # linux-smoke：Linux 运行时冒烟（本轮主目标）。把 Linux 从「编译通过」升级为
+  # 「真机可跑」——复用 linux job 编好的 .node（needs: linux + download-artifact），
+  # 在 xvfb-run 提供的真实 X 显示下真正加载 .node、mpv_create、建窗口并驱动一段
+  # 真实播放，断言 'wid-window' 会话契约（断言清单见 linux-smoke.mjs）。
+  #
+  # 只跑 session 半边（mpv 初始化 + 自建 override-redirect 未挂载视频窗口 + 播放）。
+  # presenter 半边（createPresenter/adoptVideoWindow 把视频窗口 reparent 进宿主
+  # 窗口）需要一个真实父 X 窗口 id，而 Node 无轻量 X11 绑定可在不引入重型原生依赖
+  # 的前提下造出父窗口，故 presenter reparent 保持**运行时未验证**（仅编译验证）。
+  # Windows 运行时冒烟本轮**不做**：hosted runner 的 window-station / desktop
+  # 交互是另一个独立课题。
+  #
+  # first-run 风险（本 job 无法本地复现，首个 CI run 即为验证）：
+  #   * apt 包名：libmpv-dev（同时带入运行时 libmpv.so.2，与编译端同源；即便发行版
+  #     把纯运行时包改名 libmpv2/libmpv1，装 -dev 仍带入正确 .so 依赖）、xvfb（提供
+  #     xvfb-run / Xvfb）、ffmpeg（生成 fixture）、libgl1-mesa-dri（Mesa 软件 GL 的
+  #     DRI 驱动 swrast/llvmpipe；runner 无 GPU，vo=gpu 靠它）。
+  #   * Xvfb：用 `xvfb-run -a`（-a 自动挑空闲 display 号，规避 server 冲突）；
+  #     `-screen 0 1280x1024x24` 保证 depth 24——GL 可见 visual 需要它。
+  #   * 软件渲染：LIBGL_ALWAYS_SOFTWARE=1 强制 Mesa 走软件光栅。缺它时 mpv 的 gpu
+  #     VO 可能因建不出 GL 上下文而让会话进 'error'，脚本会带 mpv 原因显性失败。
+  # ───────────────────────────────────────────────────────────────────────────
+  linux-smoke:
+    name: linux runtime smoke (ubuntu-latest, xvfb)
+    runs-on: ubuntu-latest
+    needs: linux
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      # runner 无 GPU：强制 Mesa 软件光栅，让 vo=gpu 走 llvmpipe/swrast。
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 运行 .node 只需 Node（N-API ABI 稳定，node 22 与编译端一致即可加载）。
+      # 冒烟脚本纯 Node builtin，不需要 pnpm / node_modules，故此 job 不做 install。
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # libmpv-dev 带入运行时 libmpv.so.2（与 linux 编译端同源）；xvfb 提供 X 显示；
+      # ffmpeg 生成 fixture；libgl1-mesa-dri 提供软件 GL。libx11-6 / libxext6 已随
+      # 基础镜像与 libmpv 依赖带入，无需显式安装。
+      - name: Install runtime libmpv + Xvfb + ffmpeg + software GL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libmpv-dev xvfb ffmpeg libgl1-mesa-dri
+
+      # 把 linux job 编好的 .node 落回稳定的 native 输出路径；冒烟脚本用 createRequire
+      # 按相对该路径（../../native/build/Release/embedded_mpv.node）加载。
+      - name: Download the freshly compiled embedded_mpv.node
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-mpv-linux-node
+          path: native/build/Release
+
+      - name: Assert the downloaded addon exists
+        run: |
+          node_file="${GITHUB_WORKSPACE}/native/build/Release/embedded_mpv.node"
+          test -f "$node_file" || { echo "missing $node_file"; exit 1; }
+          ls -la "$node_file"
+
+      # 用 ffmpeg 现场生成极小测试视频（testsrc，5s，320x180），不把二进制 fixture
+      # 提交进仓库。刻意**只含视频、无音轨**：headless runner 无音频设备，避免 AO
+      # 打开失败带来的抖动；无音轨时 mpv 用视频时钟推进 time-pos，足够在 20s 预算内
+      # 看到 position 越过 1s。
+      - name: Generate a tiny test fixture (ffmpeg testsrc)
+        run: |
+          set -euo pipefail
+          ffmpeg -nostdin -y -f lavfi \
+            -i testsrc=duration=5:size=320x180:rate=30 \
+            -pix_fmt yuv420p "${RUNNER_TEMP}/linux-smoke-fixture.mp4"
+          ls -la "${RUNNER_TEMP}/linux-smoke-fixture.mp4"
+
+      # 核心：在 xvfb-run 下运行冒烟脚本。脚本对 addon 加载失败 / 错误 presentation
+      # kind / 播放到不了 'playing' / position 不推进 显性失败（exit 1），使本 job
+      # 红。job 级 timeout-minutes: 15 兜底任何卡死。
+      - name: Run the Linux runtime smoke test under Xvfb
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            node --experimental-strip-types \
+            scripts/embedded-mpv/linux-smoke.mjs \
+            "${RUNNER_TEMP}/linux-smoke-fixture.mp4"

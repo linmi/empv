@@ -1,0 +1,16 @@
+# This file becomes the repository root .gitignore once the package is mirrored
+# to its standalone repo, so it has to cover what the monorepo root covers too.
+node_modules/
+.DS_Store
+*.log
+
+# Build output.
+native/build/
+native/target/
+dist/
+
+# Staged runtime: a release input, not source.
+vendor/embedded-mpv/*/include/
+vendor/embedded-mpv/*/lib/
+vendor/embedded-mpv/*/bin/
+vendor/embedded-mpv/*/runtime-manifest.json

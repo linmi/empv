@@ -1,0 +1,19 @@
+empv
+Copyright 2026 Linmi
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+
+This product includes software originally developed as part of IPTVnator
+(https://github.com/4gray/iptvnator), Copyright 2020-2021, licensed under the
+MIT License. Those portions remain under the MIT License; its full text and the
+scope of the derivation are preserved in third-party/iptvnator/.
+
+--------------------------------------------------------------------------------
+
+This product loads, but does not include, the libmpv and FFmpeg shared
+libraries, which are licensed under the GNU Lesser General Public License,
+version 2.1 or later. They are built and distributed separately from this
+source distribution. See THIRD-PARTY-NOTICES.md for the components, their
+versions and sources, and LICENSE.LGPL-2.1 for the licence text.

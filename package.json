@@ -1,0 +1,112 @@
+{
+  "name": "empv",
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.7.0",
+  "description": "Embedded libmpv player for Electron: a Rust/N-API addon with a typed session contract, IOSurface/mach compositing on macOS and native child-window embedding on Windows and Linux.",
+  "keywords": [
+    "mpv",
+    "libmpv",
+    "electron",
+    "video",
+    "player",
+    "napi",
+    "iosurface",
+    "native-addon"
+  ],
+  "license": "Apache-2.0",
+  "author": "Linmi",
+  "homepage": "https://github.com/linmi/empv#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linmi/empv.git"
+  },
+  "bugs": {
+    "url": "https://github.com/linmi/empv/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./electron": {
+      "types": "./dist/electron/index.d.ts",
+      "default": "./dist/electron/index.js"
+    },
+    "./electron/runtime-process": {
+      "types": "./dist/electron/runtimeProcess.d.ts",
+      "default": "./dist/electron/runtimeProcess.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "electron": ">=42"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "os": [
+    "darwin",
+    "win32",
+    "linux"
+  ],
+  "files": [
+    "dist",
+    "!dist/native",
+    "native/build.rs",
+    "native/Cargo.lock",
+    "native/Cargo.toml",
+    "native/shims",
+    "native/src",
+    "scripts",
+    "third-party",
+    "LICENSE",
+    "LICENSE.LGPL-2.1",
+    "NOTICE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "napi": {
+    "binaryName": "embedded_mpv",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-pc-windows-msvc",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "pnpm run verify:node-esm-imports && tsc -p tsconfig.json",
+    "build:native": "node scripts/build-native.cjs",
+    "build-runtime:macos": "node scripts/embedded-mpv/build-macos-runtime.mjs",
+    "prepare-runtime:windows": "node scripts/embedded-mpv/prepare-windows-runtime.mjs",
+    "stage-runtime": "node scripts/embedded-mpv/stage-runtime.mjs",
+    "stage-runtime:macos": "node scripts/embedded-mpv/stage-macos-runtime.mjs",
+    "smoke:windows": "node --experimental-strip-types scripts/embedded-mpv/windows-smoke.mjs",
+    "typecheck": "pnpm run build && tsc --noEmit -p tsconfig.test.json",
+    "test:node": "node --experimental-strip-types --test tests/*.test.ts",
+    "fmt": "cargo fmt --manifest-path native/Cargo.toml -- --check",
+    "clippy": "cargo clippy --manifest-path native/Cargo.toml --all-targets -- -D warnings",
+    "test": "pnpm run test:node && cargo test --manifest-path native/Cargo.toml",
+    "lint": "pnpm run fmt && pnpm run clippy",
+    "verify:node-esm-imports": "node scripts/verify-node-esm-imports.mjs --root src",
+    "verify:runtime-patches": "node scripts/embedded-mpv/verify-patches.mjs",
+    "prepack": "pnpm run build",
+    "prepare": "pnpm run build"
+  },
+  "devDependencies": {
+    "@babel/parser": "^7.29.7",
+    "@napi-rs/cli": "^3.7.2",
+    "@types/node": "^24.13.1",
+    "electron": "42.4.0",
+    "typescript": "^7.0.2"
+  }
+}
