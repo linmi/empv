@@ -235,9 +235,13 @@ jobs:
     name: windows-x64
     runs-on: windows-latest
     timeout-minutes: 45
+    # pwsh, matching the compile gate. Under Git Bash the MSVC toolchain is not
+    # what gets used: /usr/bin/link -- GNU coreutils' link(1) -- comes first on
+    # PATH and shadows link.exe, and rustc's own build scripts fail to link with
+    # "extra operand" long before anything of this package is compiled.
     defaults:
       run:
-        shell: bash
+        shell: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -274,7 +278,6 @@ jobs:
       # compile input and nothing more: only the addon leaves this job, and the
       # step after packing asserts no DLL came with it.
       - name: Stage the pinned libmpv as a compile input
-        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $prefix = Join-Path $env:RUNNER_TEMP 'libmpv-dev-prefix'
@@ -290,34 +293,40 @@ jobs:
 
       - name: Compile the addon
         run: |
-          pnpm exec napi build \
-            --release \
-            --target x86_64-pc-windows-msvc \
-            --cwd "${GITHUB_WORKSPACE}/native" \
-            --manifest-path "${GITHUB_WORKSPACE}/native/Cargo.toml" \
-            --package-json-path "${GITHUB_WORKSPACE}/package.json" \
-            --output-dir "${GITHUB_WORKSPACE}/native/build/Release"
+          $ErrorActionPreference = 'Stop'
+          $native = Join-Path $env:GITHUB_WORKSPACE 'native'
+          $manifest = Join-Path $native 'Cargo.toml'
+          $packageJson = Join-Path $env:GITHUB_WORKSPACE 'package.json'
+          $output = Join-Path $native 'build\Release'
+          pnpm exec napi build --release --target x86_64-pc-windows-msvc --cwd $native --manifest-path $manifest --package-json-path $packageJson --output-dir $output
+          if ($LASTEXITCODE -ne 0) { throw "napi build exited $LASTEXITCODE" }
 
       - name: Pack the platform package
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
           pnpm run pack:platform -- win32 x64 --from native/build/Release
-          mkdir -p "${RUNNER_TEMP}/tarballs"
-          cd platform-packages/empv-win32-x64
-          npm pack --pack-destination "${RUNNER_TEMP}/tarballs"
-          ls -l "${RUNNER_TEMP}/tarballs"
+          if ($LASTEXITCODE -ne 0) { throw "pack:platform exited $LASTEXITCODE" }
+
+          $tarballs = Join-Path $env:RUNNER_TEMP 'tarballs'
+          New-Item -ItemType Directory -Force -Path $tarballs | Out-Null
+          Push-Location 'platform-packages/empv-win32-x64'
+          npm pack --pack-destination $tarballs
+          if ($LASTEXITCODE -ne 0) { throw "npm pack exited $LASTEXITCODE" }
+          Pop-Location
+          Get-ChildItem $tarballs
 
       # A package that carries a libmpv would be a licensing mistake, not a
       # packaging one, so it is asserted rather than left to review.
       - name: Assert no libmpv was bundled
         run: |
-          set -euo pipefail
-          if compgen -G "platform-packages/empv-win32-x64/*.dll" > /dev/null; then
-            echo "The Windows package must not bundle a DLL: every libmpv build for Windows is GPL."
-            exit 1
-          fi
-          test -f platform-packages/empv-win32-x64/empv.node
-          echo "addon-only, as intended"
+          $ErrorActionPreference = 'Stop'
+          $package = 'platform-packages/empv-win32-x64'
+          $dlls = Get-ChildItem -Path $package -Filter *.dll -Recurse
+          if ($dlls) {
+            throw "The Windows package must not bundle a DLL: every libmpv build for Windows is GPL."
+          }
+          if (-not (Test-Path (Join-Path $package 'empv.node'))) { throw 'missing empv.node' }
+          Write-Host 'addon-only, as intended'
 
       - name: Upload
         uses: actions/upload-artifact@v4
