@@ -129,7 +129,16 @@ const sourcePathFor = (packageId) => path.join(sourceRoot, packageId)
 // imports libwinpthread-1.dll and libgcc_s_seh-1.dll, which would then have to
 // be shipped and licence-documented alongside it; with it there is one file.
 // The import validation at the end is what proves this actually took effect.
-const LINK_FLAGS = ['-static-libgcc', '-static-libstdc++', '-static']
+//
+// -lstdc++ because libplacebo has C++ in it (convert.cc) and mpv links with the
+// C driver, which does not bring the C++ standard library along. Whether that
+// shows up depends on the toolchain: under GCC 16 the std::to_chars/from_chars
+// floating-point overloads it calls resolved inline, under GCC 13 -- what Ubuntu
+// ships, and therefore what CI uses -- they are out of line in libstdc++ and the
+// link fails on four undefined references. The DLL contains C++ objects either
+// way, so linking the C++ runtime is correct regardless of which compiler
+// happens to hide the need for it.
+const LINK_FLAGS = ['-static-libgcc', '-static-libstdc++', '-static', '-lstdc++']
 
 const ffmpegConfigureFlags = [
   `--prefix=${prefix}`,
