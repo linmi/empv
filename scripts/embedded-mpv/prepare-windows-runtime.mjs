@@ -14,6 +14,7 @@ import {
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
+import { createMsvcImportLibrary } from './msvc-import-lib.mjs'
 import { windowsMpvDevPackage } from './runtime-pins.mjs'
 
 const rawArgs = process.argv.slice(2)
@@ -67,17 +68,6 @@ function assertEmptyDestination(destination) {
   }
 }
 
-function parseExports(dumpbinOutput) {
-  const exports = []
-  for (const line of dumpbinOutput.split(/\r?\n/)) {
-    const match = line.match(/^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]{8}\s+(\S+)/)
-    if (match) {
-      exports.push(match[1])
-    }
-  }
-  return exports
-}
-
 function main() {
   if (process.platform !== 'win32') {
     fail(`prepare-windows-runtime.mjs requires Windows, got ${process.platform}.`)
@@ -127,33 +117,20 @@ function main() {
   assertFile(headerPath, 'Pinned Windows mpv client header')
   assertFile(dllPath, 'Pinned Windows mpv runtime DLL')
 
-  const dumpbinOutput = run('dumpbin.exe', ['/nologo', '/exports', dllPath], {
-    capture: true
-  })
-  const exports = parseExports(dumpbinOutput)
-  if (exports.length === 0) {
-    fail(`No exports were parsed from ${dllPath}.`)
-  }
-
   const outputIncludeDirectory = path.join(prefix, 'include')
   const outputLibraryDirectory = path.join(prefix, 'lib')
   const outputBinaryDirectory = path.join(prefix, 'bin')
-  const defPath = path.join(outputLibraryDirectory, 'mpv.def')
-  const importLibraryPath = path.join(outputLibraryDirectory, 'mpv.lib')
   const outputDllPath = path.join(outputBinaryDirectory, windowsMpvDevPackage.dllName)
 
   mkdirSync(outputLibraryDirectory, { recursive: true })
   mkdirSync(outputBinaryDirectory, { recursive: true })
   cpSync(includeDirectory, outputIncludeDirectory, { recursive: true })
   cpSync(dllPath, outputDllPath)
-  writeFileSync(defPath, `EXPORTS\n${exports.join('\n')}\n`, 'ascii')
-  run('lib.exe', [
-    '/nologo',
-    `/def:${defPath}`,
-    '/machine:x64',
-    `/name:${windowsMpvDevPackage.dllName}`,
-    `/out:${importLibraryPath}`
-  ])
+
+  const { importLibraryPath } = createMsvcImportLibrary({
+    dllPath: outputDllPath,
+    outputLibraryDirectory
+  })
   assertFile(importLibraryPath, 'Generated MSVC COFF import library')
 
   writeFileSync(

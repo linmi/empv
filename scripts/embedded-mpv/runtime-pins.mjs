@@ -16,15 +16,18 @@ export const mpvSource = {
   license: 'LGPL-compatible configuration with -Dgpl=false'
 }
 
-// Windows CI and the interactive hardware gate compile against this exact
-// upstream development archive. It is compile/test input only, and the reason is
-// concrete rather than cautious: the DLL is a GPL build. Its embedded mpv
+// The compile gate and the interactive hardware gate build against this exact
+// upstream development archive, and nothing else does. It is compile/test input
+// and can never be shipped: the DLL is a GPL build -- its embedded mpv
 // configuration carries no -Dgpl=false (mpv defaults to true) and enables
 // libbluray, dvdnav and vapoursynth, and the binary exports libx264/libx265
 // symbols, so its FFmpeg was configured --enable-gpl. Redistributing it inside
 // an Apache-2.0 package would put that whole distribution under the GPL.
-// Shipping a Windows prebuilt therefore waits on an LGPL runtime built from
-// pinned sources, the way build-macos-runtime.mjs does for macOS.
+//
+// What ships is built by build-windows-runtime.mjs instead. This stays because
+// the gate runs on every push and cross-compiling seven packages to answer
+// "does the addon still compile" would be paying an hour to learn a minute's
+// worth; the release is where the shipped runtime is built and verified.
 export const windowsMpvDevPackage = {
   version: '20260718-git-94335ab87a',
   url: 'https://github.com/zhongfly/mpv-winbuild/releases/download/2026-07-18-94335ab87a/mpv-dev-x86_64-20260718-git-94335ab87a.7z',
@@ -33,8 +36,19 @@ export const windowsMpvDevPackage = {
 }
 
 // mpv source patches applied (in order) after extraction, before configuring.
-// Keep in sync with scripts/embedded-mpv/patches/ and record in the manifest.
-export const mpvPatches = ['mpv-videotoolbox-gl-without-cocoa.patch']
+// Keyed by platform because a patch is not automatically portable: the
+// videotoolbox one adds an unconditional dependency('appleframeworks', ...) to
+// meson.build, so applying it to a Windows cross build fails configure with
+// "Dependency appleframeworks not found" and nothing in that message points at
+// a patch. Keep in sync with scripts/embedded-mpv/patches/.
+export const mpvPatchesByPlatform = {
+  darwin: ['mpv-videotoolbox-gl-without-cocoa.patch'],
+  win32: []
+}
+
+// Every patch, for the dry-run gate: whether a patch still applies to the
+// pinned source is a question about the source, not about who consumes it.
+export const allMpvPatches = [...new Set(Object.values(mpvPatchesByPlatform).flat())]
 
 // Invariants the videotoolbox-gl patch depends on:
 // - the meson option it toggles must still exist in the source's meson.options

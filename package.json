@@ -93,6 +93,7 @@
     "pack:platform": "node scripts/pack-platform-package.mjs",
     "verify:prebuilt": "node scripts/verify-prebuilt.mjs",
     "build-runtime:macos": "node scripts/embedded-mpv/build-macos-runtime.mjs",
+    "build-runtime:windows": "node scripts/embedded-mpv/build-windows-runtime.mjs",
     "prepare-runtime:windows": "node scripts/embedded-mpv/prepare-windows-runtime.mjs",
     "stage-runtime": "node scripts/embedded-mpv/stage-runtime.mjs",
     "stage-runtime:macos": "node scripts/embedded-mpv/stage-macos-runtime.mjs",

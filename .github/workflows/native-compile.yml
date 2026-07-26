@@ -253,21 +253,9 @@ jobs:
           pnpm exec napi build --release --target x86_64-pc-windows-msvc --cwd $native --manifest-path $manifest --package-json-path $packageJson --output-dir $output
           if ($LASTEXITCODE -ne 0) { throw "napi build exited $LASTEXITCODE" }
 
-      # 产出可分发的 Windows 预编译包。它只带 addon：Windows 上能拿到的 libmpv
-      # 构建都是 GPL，捆绑会让分发方被传染，而使用者把 libmpv-2.dll 放到 addon
-      # 同目录即可——Windows 优先在加载模块自身目录里找 DLL。
-      - name: Pack the Windows platform package
-        run: |
-          $ErrorActionPreference = 'Stop'
-          pnpm run pack:platform -- win32 x64 --from native/build/Release
-          if ($LASTEXITCODE -ne 0) { throw "pack:platform exited $LASTEXITCODE" }
-
-      - name: Upload the Windows platform package
-        uses: actions/upload-artifact@v4
-        with:
-          name: empv-win32-x64
-          path: platform-packages/empv-win32-x64
-          if-no-files-found: error
+      # 这里不再打 Windows 平台包。它现在捆绑 LGPL libmpv，而那份 runtime 由
+      # release 工作流交叉编译产出；在这里打一个 addon-only 的包，产物没有任何
+      # 地方会用，而且打包器现在要求 DLL 存在，会直接失败。
 
       - name: Assert empv.node was produced
         run: |

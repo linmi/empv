@@ -20,13 +20,12 @@
 // sees this tarball still gets the notices, the licence text and the manifest
 // naming every source archive.
 //
-// Windows ships the addon alone. Every libmpv build available for it is GPL --
-// the pinned upstream development archive has no -Dgpl=false in its embedded
-// configuration and exports libx264/libx265 symbols -- so bundling one would put
-// this Apache-2.0 distribution under the GPL. Shipping only the addon avoids
-// that entirely: the user drops libmpv-2.dll next to it, Windows searches the
-// loading module's own directory first, and whatever licence that DLL carries
-// stays their decision about their own distribution rather than ours.
+// Windows carries a libmpv too, but one that had to be built to exist: every
+// prebuilt Windows libmpv is GPL, so build-windows-runtime.mjs cross-compiles an
+// LGPL one with MinGW-w64 and links every dependency into it. That leaves a
+// single DLL rather than macOS's graph, so it goes beside empv.node instead of
+// into lib/ -- which is also where libuv's LOAD_WITH_ALTERED_SEARCH_PATH looks
+// when it opens the addon.
 //
 // Linux has no package yet. It would also be addon-only -- distributions package
 // libmpv and the addon links it by soname -- but the resolver looks for the
@@ -39,6 +38,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -46,14 +46,14 @@ import {
 } from 'node:fs'
 import { cpSync } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const mainManifest = JSON.parse(readFileSync(path.join(packageRoot, 'package.json'), 'utf8'))
 
 // Platforms whose prebuilt package carries the libmpv runtime. Anything absent
 // here ships the addon alone and expects the system to provide libmpv.
-const BUNDLES_RUNTIME = new Set(['darwin'])
+const BUNDLES_RUNTIME = new Set(['darwin', 'win32'])
 
 // Copied next to the binaries so the obligations travel with them.
 const LICENCE_FILES = ['LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES.md']
@@ -96,8 +96,18 @@ function readLoadCommands(binaryPath) {
 // pack at a macOS build directory would produce an `os: ["win32"]` package
 // carrying a Mach-O binary. npm would install it happily and dlopen would fail
 // on a machine nobody involved in the release owns.
-function readBinaryTarget(binaryPath) {
+export function readBinaryTarget(binaryPath) {
   const header = readFileSync(binaryPath)
+
+  // Every read below is at a fixed offset, so a file too short to hold a header
+  // has to be rejected before the first one. Otherwise a truncated download or a
+  // text file where a binary was expected surfaces as a RangeError out of
+  // Buffer.readUInt32LE, which says nothing about what was being packaged.
+  if (header.length < 64) {
+    throw new Error(
+      `${binaryPath} is ${header.length} bytes: too short to be a Mach-O, PE or ELF binary.`
+    )
+  }
 
   // Mach-O: magic, then cputype. A fat binary is not something any build here
   // produces, so it is left to fall through to "unrecognised" rather than
@@ -116,6 +126,13 @@ function readBinaryTarget(binaryPath) {
   // is the machine type.
   if (header.readUInt16LE(0) === 0x5a4d) {
     const coffOffset = header.readUInt32LE(0x3c)
+    // e_lfanew is attacker- and corruption-controlled as far as this reader is
+    // concerned, so it is range-checked before being used as an offset.
+    if (coffOffset + 6 > header.length) {
+      throw new Error(
+        `${binaryPath} starts with MZ but has no PE header: it points past the end of the file.`
+      )
+    }
     if (header.readUInt32LE(coffOffset) !== 0x00004550) {
       throw new Error(`${binaryPath} starts with MZ but has no PE header.`)
     }
@@ -258,7 +275,7 @@ function main() {
 
   const files = ['empv.node', 'runtime-manifest.json', ...LICENCE_FILES]
 
-  if (bundlesRuntime) {
+  if (bundlesRuntime && platform === 'darwin') {
     const libraryDirectory = path.join(sourceDirectory, 'lib')
     if (!existsSync(libraryDirectory) || !statSync(libraryDirectory).isDirectory()) {
       return fail(`${platform} bundles its runtime, but ${libraryDirectory} is missing.`)
@@ -273,6 +290,25 @@ function main() {
     }
     console.log(`[pack-platform] libraries: ${libraries.size} (from the addon's load commands)`)
     files.push('lib/', 'third-party/')
+  } else if (bundlesRuntime && platform === 'win32') {
+    // The Windows runtime is one statically linked DLL, so there is no graph to
+    // walk: it goes beside empv.node, where libuv's LOAD_WITH_ALTERED_SEARCH_PATH
+    // finds it. `lib/` is deliberately not copied -- it holds the same DLL plus
+    // the MSVC import library, which is a compile input and has no business in a
+    // package that only ever gets loaded.
+    const dlls = readdirSync(sourceDirectory).filter((entry) =>
+      entry.toLowerCase().endsWith('.dll')
+    )
+    if (dlls.length === 0) {
+      return fail(
+        `${platform} bundles its runtime, but ${sourceDirectory} has no DLL beside the addon.`
+      )
+    }
+    for (const dll of dlls) {
+      copyFileSync(path.join(sourceDirectory, dll), path.join(outputDirectory, dll))
+    }
+    console.log(`[pack-platform] libraries: ${dlls.join(', ')}`)
+    files.push(...dlls, 'third-party/')
     cpSync(path.join(packageRoot, 'third-party'), path.join(outputDirectory, 'third-party'), {
       recursive: true
     })
@@ -309,18 +345,16 @@ function main() {
       `${platform}-${arch}. Installed automatically as an optional dependency of ` +
       `[\`empv\`](https://github.com/linmi/empv); there is no reason to depend on it directly.\n` +
       (bundlesRuntime
-        ? '\nThe bundled libmpv and FFmpeg libraries are LGPL-2.1-or-later. See ' +
-          '`THIRD-PARTY-NOTICES.md` for their versions and sources, and `runtime-manifest.json` ' +
-          'for the exact build inputs of the binaries in this package.\n'
-        : platform === 'win32'
-          ? '\nThis package carries no libmpv, and deliberately so: every Windows build ' +
-            'of it is GPL, and bundling one would relicense whatever ships it.\n\n' +
-            'Put a `libmpv-2.dll` in this directory, beside `empv.node`. Windows searches ' +
-            "the loading module's own directory first, so nothing else needs configuring. " +
-            'Whether you may redistribute that DLL with your application depends on its ' +
-            'licence, which is a decision about your distribution rather than this one.\n'
-          : '\nThis package carries no libmpv: install it from your system and the addon ' +
-            'will link it by soname.\n')
+        ? '\nThe bundled libmpv and FFmpeg are LGPL-2.1-or-later, built from pinned ' +
+          'sources without `--enable-gpl`. See `THIRD-PARTY-NOTICES.md` for their versions ' +
+          'and sources, and `runtime-manifest.json` for the exact build inputs.\n' +
+          (platform === 'win32'
+            ? '\nEvery dependency is linked into `libmpv-2.dll`, so it is one file that ' +
+              'imports nothing but Windows itself. It sits beside `empv.node` because that ' +
+              'is where the addon loader looks.\n'
+            : '')
+        : '\nThis package carries no libmpv: install it from your system and the addon ' +
+          'will link it by soname.\n')
   )
 
   console.log(`[pack-platform] wrote ${path.relative(packageRoot, outputDirectory)}`)
@@ -334,8 +368,12 @@ function main() {
   return null
 }
 
-try {
-  main()
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error))
+// Guarded so readBinaryTarget can be imported and tested without the script
+// packing anything as a side effect of the import.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    main()
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error))
+  }
 }

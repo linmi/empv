@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 /* oxlint-disable no-console -- CLI 构建脚本：console 是其面向终端的输出通道 */
-import crypto from 'crypto'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
-import { mpvPatches, mpvSource, runtimeBuildRoot } from './runtime-pins.mjs'
+
+import {
+  applyMpvPatches,
+  commandExists,
+  downloadSources,
+  ensureTools,
+  log,
+  packagesMetadata,
+  run,
+  sourceMetadata
+} from './runtime-build-core.mjs'
+import { mpvPatchesByPlatform, mpvSource, runtimeBuildRoot } from './runtime-pins.mjs'
 
 const rawArgs = process.argv.slice(2)
 const args = rawArgs[0] === '--' ? rawArgs.slice(1) : rawArgs
@@ -14,7 +24,6 @@ const [arch, rawPrefix] = args
 const validArchitectures = new Set(['arm64', 'x64'])
 const macosDeploymentTarget = process.env.MACOSX_DEPLOYMENT_TARGET ?? '11.0'
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
-const packageRoot = path.resolve(scriptDir, '..', '..')
 const patchesDir = path.join(scriptDir, 'patches')
 
 const sourcePackages = [
@@ -150,31 +159,6 @@ const mpvMesonFlags = [
   '-Dvideotoolbox-gl=enabled'
 ]
 
-function log(message) {
-  process.stdout.write(`[embedded-mpv-runtime] ${message}\n`)
-}
-
-function run(command, commandArgs, options = {}) {
-  log(`${command} ${commandArgs.join(' ')}`)
-  const result = spawnSync(command, commandArgs, {
-    cwd: options.cwd ?? packageRoot,
-    env: options.env ?? buildEnv(),
-    stdio: 'inherit',
-    ...options
-  })
-
-  if (result.status !== 0) {
-    throw new Error(`${command} ${commandArgs.join(' ')} failed with status ${result.status ?? 1}.`)
-  }
-}
-
-function commandExists(command) {
-  const result = spawnSync('sh', ['-lc', `command -v ${command}`], {
-    stdio: 'ignore'
-  })
-  return result.status === 0
-}
-
 function buildEnv() {
   const pkgConfigDirs = [
     path.join(prefix, 'lib', 'pkgconfig'),
@@ -194,165 +178,25 @@ function buildEnv() {
   }
 }
 
-function ensureTools() {
-  const requiredCommands = ['curl', 'tar', 'make', 'meson', 'ninja', 'pkg-config', 'git', 'patch']
-  const missing = requiredCommands.filter((command) => !commandExists(command))
-
-  if (missing.length > 0) {
-    throw new Error(`Missing required build tools: ${missing.join(', ')}`)
-  }
-}
-
-function archivePathFor(sourcePackage) {
-  const extension = sourcePackage.url.endsWith('.tar.xz') ? '.tar.xz' : '.tar.gz'
-  return path.join(archiveRoot, `${sourcePackage.id}-${sourcePackage.version}${extension}`)
-}
-
 function sourcePathFor(packageId) {
   return path.join(sourceRoot, packageId)
 }
 
-function sha256File(filePath) {
-  const hash = crypto.createHash('sha256')
-  hash.update(fs.readFileSync(filePath))
-  return hash.digest('hex')
-}
-
-function runCapture(command, commandArgs, options = {}) {
-  const result = spawnSync(command, commandArgs, {
-    cwd: options.cwd ?? packageRoot,
-    env: options.env ?? buildEnv(),
-    encoding: 'utf8',
-    stdio: 'pipe',
-    ...options
-  })
-
-  if (result.status !== 0) {
-    const stderr = result.stderr ? `\n${result.stderr}` : ''
-    throw new Error(
-      `${command} ${commandArgs.join(' ')} failed with status ${result.status ?? 1}.${stderr}`
-    )
-  }
-
-  return result.stdout.trim()
-}
-
-function cloneGitSource(sourcePackage) {
-  const packageSourcePath = sourcePathFor(sourcePackage.id)
-  fs.rmSync(packageSourcePath, { recursive: true, force: true })
-
-  run('git', [
-    'clone',
-    '--depth',
-    '1',
-    '--branch',
-    sourcePackage.tag,
-    sourcePackage.gitUrl,
-    packageSourcePath
-  ])
-  run(
-    'git',
-    [
-      'submodule',
-      'update',
-      '--init',
-      '--depth',
-      '1',
-      '3rdparty/glad',
-      '3rdparty/jinja',
-      '3rdparty/markupsafe',
-      '3rdparty/fast_float',
-      '3rdparty/Vulkan-Headers'
-    ],
-    { cwd: packageSourcePath }
-  )
-
-  sourcePackage.gitCommit = runCapture('git', ['rev-parse', 'HEAD'], {
-    cwd: packageSourcePath
-  })
-  sourcePackage.submodules = runCapture(
-    'git',
-    [
-      'submodule',
-      'status',
-      '3rdparty/glad',
-      '3rdparty/jinja',
-      '3rdparty/markupsafe',
-      '3rdparty/fast_float',
-      '3rdparty/Vulkan-Headers'
-    ],
-    { cwd: packageSourcePath }
-  )
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
-function downloadSources() {
-  fs.mkdirSync(archiveRoot, { recursive: true })
-  fs.mkdirSync(sourceRoot, { recursive: true })
-
-  for (const sourcePackage of sourcePackages) {
-    if (sourcePackage.gitUrl) {
-      cloneGitSource(sourcePackage)
-      continue
-    }
-
-    const archivePath = archivePathFor(sourcePackage)
-    if (!fs.existsSync(archivePath)) {
-      run('curl', [
-        '-fL',
-        '--retry',
-        '3',
-        '--retry-delay',
-        '5',
-        '-o',
-        archivePath,
-        sourcePackage.url
-      ])
-    }
-
-    const packageSourcePath = sourcePathFor(sourcePackage.id)
-    fs.rmSync(packageSourcePath, { recursive: true, force: true })
-    fs.mkdirSync(packageSourcePath, { recursive: true })
-    run('tar', ['-xf', archivePath, '-C', packageSourcePath, '--strip-components', '1'])
-    sourcePackage.sha256 = sha256File(archivePath)
-  }
-}
-
-function applyMpvPatches() {
-  const mpvPackage = packageById.get('mpv')
-  const mpvSourcePath = sourcePathFor('mpv')
-  const applied = []
-
-  for (const patchName of mpvPatches) {
-    const patchPath = path.join(patchesDir, patchName)
-    if (!fs.existsSync(patchPath)) {
-      throw new Error(`Missing mpv patch: ${patchPath}`)
-    }
-
-    log(`Applying mpv patch ${patchName}`)
-    // Fresh extraction each run, so the tree is always unpatched here; any
-    // failure means the patch no longer matches the pinned mpv source.
-    run('patch', ['-p1', '--input', patchPath], { cwd: mpvSourcePath })
-    applied.push(patchName)
-  }
-
-  mpvPackage.patches = applied
-}
-
 function configureMakeInstall(packageId, configureArgs) {
   const packageSourcePath = sourcePathFor(packageId)
+  const env = buildEnv()
   run('./configure', [`--prefix=${prefix}`, ...configureArgs], {
-    cwd: packageSourcePath
+    cwd: packageSourcePath,
+    env
   })
-  run('make', [`-j${parallelism}`], { cwd: packageSourcePath })
-  run('make', ['install'], { cwd: packageSourcePath })
+  run('make', [`-j${parallelism}`], { cwd: packageSourcePath, env })
+  run('make', ['install'], { cwd: packageSourcePath, env })
 }
 
 function mesonInstall(packageId, mesonArgs) {
   const packageSourcePath = sourcePathFor(packageId)
   const buildDir = path.join(packageSourcePath, 'build-empv')
+  const env = buildEnv()
   fs.rmSync(buildDir, { recursive: true, force: true })
   run(
     'meson',
@@ -365,10 +209,10 @@ function mesonInstall(packageId, mesonArgs) {
       '--default-library=shared',
       ...mesonArgs
     ],
-    { cwd: packageSourcePath }
+    { cwd: packageSourcePath, env }
   )
-  run('meson', ['compile', '-C', buildDir], { cwd: packageSourcePath })
-  run('meson', ['install', '-C', buildDir], { cwd: packageSourcePath })
+  run('meson', ['compile', '-C', buildDir], { cwd: packageSourcePath, env })
+  run('meson', ['install', '-C', buildDir], { cwd: packageSourcePath, env })
 }
 
 function buildRuntime() {
@@ -399,9 +243,10 @@ function buildRuntime() {
   ])
 
   const ffmpegSourcePath = sourcePathFor('ffmpeg')
-  run('./configure', ffmpegConfigureFlags, { cwd: ffmpegSourcePath })
-  run('make', [`-j${parallelism}`], { cwd: ffmpegSourcePath })
-  run('make', ['install'], { cwd: ffmpegSourcePath })
+  const ffmpegEnv = buildEnv()
+  run('./configure', ffmpegConfigureFlags, { cwd: ffmpegSourcePath, env: ffmpegEnv })
+  run('make', [`-j${parallelism}`], { cwd: ffmpegSourcePath, env: ffmpegEnv })
+  run('make', ['install'], { cwd: ffmpegSourcePath, env: ffmpegEnv })
 
   mesonInstall('libplacebo', [
     '-Dopengl=enabled',
@@ -485,20 +330,6 @@ function validateRuntimeLinks() {
   }
 }
 
-function sourceMetadata(packageId) {
-  const sourcePackage = packageById.get(packageId)
-  return {
-    version: sourcePackage.version,
-    sourceUrl: sourcePackage.url ?? sourcePackage.gitUrl,
-    ...(sourcePackage.tag ? { sourceTag: sourcePackage.tag } : {}),
-    ...(sourcePackage.sha256 ? { sourceSha256: sourcePackage.sha256 } : {}),
-    ...(sourcePackage.gitCommit ? { sourceGitCommit: sourcePackage.gitCommit } : {}),
-    ...(sourcePackage.submodules ? { sourceSubmodules: sourcePackage.submodules } : {}),
-    ...(sourcePackage.patches ? { patches: sourcePackage.patches } : {}),
-    license: sourcePackage.license
-  }
-}
-
 function writeManifest() {
   const manifest = {
     origin: 'vendored-lgpl-source-build',
@@ -509,28 +340,14 @@ function writeManifest() {
       platform: process.platform,
       arch: process.arch
     },
-    packages: Object.fromEntries(
-      sourcePackages.map((sourcePackage) => [
-        sourcePackage.id,
-        {
-          version: sourcePackage.version,
-          sourceUrl: sourcePackage.url ?? sourcePackage.gitUrl,
-          ...(sourcePackage.tag ? { sourceTag: sourcePackage.tag } : {}),
-          ...(sourcePackage.sha256 ? { sourceSha256: sourcePackage.sha256 } : {}),
-          ...(sourcePackage.gitCommit ? { sourceGitCommit: sourcePackage.gitCommit } : {}),
-          ...(sourcePackage.submodules ? { sourceSubmodules: sourcePackage.submodules } : {}),
-          ...(sourcePackage.patches ? { patches: sourcePackage.patches } : {}),
-          license: sourcePackage.license
-        }
-      ])
-    ),
+    packages: packagesMetadata(sourcePackages),
     ffmpeg: {
-      ...sourceMetadata('ffmpeg'),
+      ...sourceMetadata(packageById.get('ffmpeg')),
       licensePolicy: 'LGPL, built without --enable-gpl and --enable-nonfree',
       configureFlags: ffmpegConfigureFlags
     },
     mpv: {
-      ...sourceMetadata('mpv'),
+      ...sourceMetadata(packageById.get('mpv')),
       licensePolicy: 'LGPL-compatible libmpv, built with -Dlibmpv=true -Dgpl=false',
       mesonFlags: mpvMesonFlags
     },
@@ -545,10 +362,16 @@ function writeManifest() {
 }
 
 try {
-  ensureTools()
+  ensureTools(['curl', 'tar', 'make', 'meson', 'ninja', 'pkg-config', 'git', 'patch'])
   fs.mkdirSync(buildRoot, { recursive: true })
-  downloadSources()
-  applyMpvPatches()
+  downloadSources({ sourcePackages, archiveRoot, sourceRoot, sourcePathFor, env: process.env })
+  applyMpvPatches({
+    mpvPackage: packageById.get('mpv'),
+    mpvSourcePath: sourcePathFor('mpv'),
+    patchesDir,
+    patchNames: mpvPatchesByPlatform.darwin,
+    env: process.env
+  })
   buildRuntime()
   validateRuntimeLinks()
   writeManifest()

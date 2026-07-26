@@ -17,7 +17,7 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import {
   mpvArchiveName,
-  mpvPatches,
+  allMpvPatches,
   mpvSource,
   runtimeBuildRoot,
   videotoolboxGlBuildFlag,
@@ -135,7 +135,7 @@ function readPatchHeaderRemovalCondition(patchPath) {
 function dryRunPatch(patchName, extractDir, failures) {
   const patchPath = path.join(patchesDir, patchName)
   if (!fs.existsSync(patchPath)) {
-    failures.push(`Missing patch file listed in mpvPatches: ${patchPath}`)
+    failures.push(`Missing patch file listed in mpvPatchesByPlatform: ${patchPath}`)
     return
   }
 
@@ -231,7 +231,7 @@ function assertBuildScriptPassesFlag(failures) {
 }
 
 function main() {
-  log(`Verifying ${mpvPatches.length} patch(es) against pinned mpv ${mpvSource.version}`)
+  log(`Verifying ${allMpvPatches.length} patch(es) against pinned mpv ${mpvSource.version}`)
 
   for (const tool of ['tar', 'patch']) {
     if (!commandExists(tool)) {
@@ -244,7 +244,7 @@ function main() {
   const extractDir = extractFreshSource(archivePath)
 
   try {
-    for (const patchName of mpvPatches) {
+    for (const patchName of allMpvPatches) {
       dryRunPatch(patchName, extractDir, failures)
     }
     assertMesonOptionExists(extractDir, failures)

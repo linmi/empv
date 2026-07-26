@@ -9,9 +9,10 @@
 #                             pinned sources with -Dgpl=false. macOS has no
 #                             system libmpv, so the package has to carry one,
 #                             and it has to be the LGPL build.
-#   win32-x64                 the addon alone. Every Windows libmpv build is
-#                             GPL, so bundling one would relicense whatever
-#                             ships it; the user supplies libmpv-2.dll.
+#   win32-x64                 the addon plus a libmpv cross-compiled here with
+#                             MinGW-w64, statically linked into one DLL. Every
+#                             prebuilt Windows libmpv is GPL, so the only way to
+#                             bundle one at all is to build it.
 #   (no linux)                it would be addon-only, but the resolver looks for
 #                             the library inside the runtime directory and on
 #                             Linux it lives in /usr/lib. Until that discovery
@@ -278,13 +279,93 @@ jobs:
   # native compile gate already drives a real session against the pinned runtime
   # on every push.
   # ───────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────
+  # The Windows libmpv, cross-compiled with MinGW-w64 on a Linux runner. It runs
+  # here rather than on windows-latest because mpv has no MSVC build and MinGW
+  # cross-compilation is what its own Windows builds have always used -- and
+  # because a Linux runner is several times cheaper in wall-clock for a
+  # seven-package source build.
+  #
+  # The MSVC-built addon links the result through an import library synthesised
+  # from the DLL's exports, which is the same mechanism the compile gate already
+  # uses against the pinned upstream DLL.
+  # ───────────────────────────────────────────────────────────────────────────
+  windows-runtime:
+    name: windows runtime (mingw cross)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: decide
+    if: needs.decide.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # apt's meson trails what mpv and libplacebo require often enough that
+      # pinning to the distribution version is a recurring failure; pipx tracks
+      # upstream.
+      - name: Install the cross toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 ninja-build nasm pkg-config
+          pipx install meson
+          x86_64-w64-mingw32-gcc --version | head -1
+          meson --version
+
+      - name: Setup pnpm (from packageManager field)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Cache the built LGPL runtime
+        id: runtime-cache
+        uses: actions/cache@v4
+        with:
+          path: windows-runtime-prefix
+          key: >-
+            empv-lgpl-runtime-win32-x64-${{ hashFiles(
+              'scripts/embedded-mpv/runtime-pins.mjs',
+              'scripts/embedded-mpv/build-windows-runtime.mjs',
+              'scripts/embedded-mpv/patches/**'
+            ) }}
+
+      - name: Cross-compile the LGPL libmpv from pinned sources
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        run: pnpm run build-runtime:windows -- x64 "${GITHUB_WORKSPACE}/windows-runtime-prefix"
+
+      # Only the header, the DLL and the manifest cross to the Windows job. The
+      # rest of the prefix is a few hundred megabytes of static archives that
+      # were link inputs and are of no use downstream.
+      - name: Collect what the Windows build needs
+        run: |
+          set -euo pipefail
+          prefix="${GITHUB_WORKSPACE}/windows-runtime-prefix"
+          out="${RUNNER_TEMP}/libmpv-lgpl"
+          mkdir -p "${out}/bin"
+          cp -R "${prefix}/include" "${out}/include"
+          cp "${prefix}"/bin/*.dll "${out}/bin/"
+          cp "${prefix}/runtime-manifest.json" "${out}/"
+          ls -l "${out}/bin"
+          du -sh "${out}"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-lgpl-runtime
+          path: ${{ runner.temp }}/libmpv-lgpl
+          if-no-files-found: error
+
   windows:
     name: windows-x64
     runs-on: windows-latest
     timeout-minutes: 45
-    needs: decide
-    # Builds when there is a release to build, and on a manual run so the whole
-    # path can be exercised without publishing. Nothing else compiles anything.
+    needs: [decide, windows-runtime]
     if: needs.decide.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
     # pwsh, matching the compile gate. Under Git Bash the MSVC toolchain is not
     # what gets used: /usr/bin/link -- GNU coreutils' link(1) -- comes first on
@@ -306,8 +387,8 @@ jobs:
           workspaces: native -> target
           key: release-win32
 
-      # Puts lib.exe on PATH, which prepare-runtime:windows uses to synthesise
-      # the import library from the DLL's exports.
+      # dumpbin.exe and lib.exe, which turn the DLL's export table into an
+      # import library, and link.exe for the addon itself.
       - name: Setup MSVC developer environment (x64)
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -324,38 +405,51 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
-      # Windows cannot link against a DLL without an import library, so a libmpv
-      # has to be present at compile time even though none is shipped. It is a
-      # compile input and nothing more: only the addon leaves this job, and the
-      # step after packing asserts no DLL came with it.
-      - name: Stage the pinned libmpv as a compile input
+      - name: Download the cross-built LGPL runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-lgpl-runtime
+          path: ${{ runner.temp }}/libmpv-lgpl
+
+      # MinGW's linker emits a .dll.a that link.exe will not read, so the import
+      # library is synthesised here from the DLL's own exports. Staging then puts
+      # the runtime where build:native looks for a vendored one, which is the
+      # same path macOS takes.
+      - name: Stage the runtime for the addon build
         run: |
           $ErrorActionPreference = 'Stop'
-          $prefix = Join-Path $env:RUNNER_TEMP 'libmpv-dev-prefix'
-          pnpm run prepare-runtime:windows -- $prefix
-          if ($LASTEXITCODE -ne 0) { throw "Windows runtime preparation exited $LASTEXITCODE" }
+          $prefix = Join-Path $env:RUNNER_TEMP 'libmpv-lgpl'
+          $dll = Join-Path $prefix 'bin\libmpv-2.dll'
+          if (-not (Test-Path $dll)) { throw "missing $dll" }
 
-          $libPath = Join-Path $prefix 'lib\mpv.lib'
-          if (-not (Test-Path $libPath)) { throw "missing $libPath" }
+          node scripts/embedded-mpv/msvc-import-lib.mjs $dll (Join-Path $prefix 'lib')
+          if ($LASTEXITCODE -ne 0) { throw "import library generation exited $LASTEXITCODE" }
 
-          "LIBMPV_INCLUDE_DIR=$prefix\include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "LIBMPV_LIBRARY_DIR=$prefix\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "LIBMPV_IMPORT_LIB=$libPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          pnpm run stage-runtime -- win32 x64 $prefix
+          if ($LASTEXITCODE -ne 0) { throw "stage-runtime exited $LASTEXITCODE" }
 
-      - name: Compile the addon
+      - name: Build the addon against the staged runtime
+        env:
+          EMPV_REQUIRE: '1'
         run: |
           $ErrorActionPreference = 'Stop'
-          $native = Join-Path $env:GITHUB_WORKSPACE 'native'
-          $manifest = Join-Path $native 'Cargo.toml'
-          $packageJson = Join-Path $env:GITHUB_WORKSPACE 'package.json'
-          $output = Join-Path $native 'build\Release'
-          pnpm exec napi build --release --target x86_64-pc-windows-msvc --cwd $native --manifest-path $manifest --package-json-path $packageJson --output-dir $output
-          if ($LASTEXITCODE -ne 0) { throw "napi build exited $LASTEXITCODE" }
+          pnpm run build:native
+          if ($LASTEXITCODE -ne 0) { throw "build:native exited $LASTEXITCODE" }
+
+      - name: Assert the addon carries the release runtime
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content dist/native/runtime-manifest.json | ConvertFrom-Json
+          if ($manifest.origin -ne 'vendored-lgpl') {
+            throw "Refusing to release a `"$($manifest.origin)`" runtime."
+          }
+          if ($manifest.arch -ne 'x64') { throw "Staged runtime is $($manifest.arch), not x64." }
+          Write-Host "origin=$($manifest.origin) arch=$($manifest.arch)"
 
       - name: Pack the platform package
         run: |
           $ErrorActionPreference = 'Stop'
-          pnpm run pack:platform -- win32 x64 --from native/build/Release
+          pnpm run pack:platform -- win32 x64
           if ($LASTEXITCODE -ne 0) { throw "pack:platform exited $LASTEXITCODE" }
 
           $tarballs = Join-Path $env:RUNNER_TEMP 'tarballs'
@@ -366,18 +460,22 @@ jobs:
           Pop-Location
           Get-ChildItem $tarballs
 
-      # A package that carries a libmpv would be a licensing mistake, not a
-      # packaging one, so it is asserted rather than left to review.
-      - name: Assert no libmpv was bundled
+      # The package now carries a libmpv, so what has to be asserted is that it
+      # is the one built here. A GPL DLL arriving by any other route would
+      # relicense everything that installs this.
+      - name: Assert the bundled libmpv is the LGPL one
         run: |
           $ErrorActionPreference = 'Stop'
           $package = 'platform-packages/empv-win32-x64'
-          $dlls = Get-ChildItem -Path $package -Filter *.dll -Recurse
-          if ($dlls) {
-            throw "The Windows package must not bundle a DLL: every libmpv build for Windows is GPL."
+          $dlls = @(Get-ChildItem -Path $package -Filter *.dll)
+          if ($dlls.Count -ne 1 -or $dlls[0].Name -ne 'libmpv-2.dll') {
+            throw "Expected exactly libmpv-2.dll, found: $($dlls.Name -join ', ')"
           }
-          if (-not (Test-Path (Join-Path $package 'empv.node'))) { throw 'missing empv.node' }
-          Write-Host 'addon-only, as intended'
+          $manifest = Get-Content (Join-Path $package 'runtime-manifest.json') | ConvertFrom-Json
+          if ($manifest.origin -ne 'vendored-lgpl') {
+            throw "Bundled runtime origin is $($manifest.origin), not vendored-lgpl."
+          }
+          Write-Host "bundled $($dlls[0].Name) ($([math]::Round($dlls[0].Length / 1MB, 1)) MB), origin=$($manifest.origin)"
 
       - name: Upload
         uses: actions/upload-artifact@v4
@@ -394,7 +492,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   release:
     name: release
-    needs: [decide, main-package, macos, windows]
+    needs: [decide, main-package, macos, windows-runtime, windows]
     if: needs.decide.outputs.should_release == 'true' && inputs.dry_run != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -449,15 +547,16 @@ jobs:
 
           ## What is in each package
 
-          The macOS packages carry \`empv.node\` and a libmpv runtime built from
-          pinned sources with \`-Dgpl=false\`. Those libraries are
-          LGPL-2.1-or-later; \`THIRD-PARTY-NOTICES.md\` lists their versions and
-          sources and \`runtime-manifest.json\` records the exact build inputs.
+          Every package carries \`empv.node\` and the libmpv it loads, built from
+          pinned sources with \`-Dgpl=false\` and no \`--enable-gpl\` FFmpeg.
+          Those libraries are LGPL-2.1-or-later; \`THIRD-PARTY-NOTICES.md\` lists
+          their versions and sources and \`runtime-manifest.json\` records the
+          exact build inputs. Nothing needs installing alongside them.
 
-          The Windows package carries \`empv.node\` alone. Every libmpv build
-          available for Windows is GPL, and bundling one would relicense whatever
-          ships it, so you supply your own: put \`libmpv-2.dll\` in the package
-          directory next to \`empv.node\`.
+          On Windows that libmpv had to be built rather than fetched: every
+          prebuilt Windows libmpv is GPL. It is cross-compiled with MinGW-w64
+          and every dependency is linked into the one DLL, which imports nothing
+          but Windows itself.
 
           There is no Linux package. It would be addon-only too, but the runtime
           resolver only looks for libmpv inside the runtime directory, and on

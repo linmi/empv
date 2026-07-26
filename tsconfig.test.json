@@ -5,7 +5,13 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": "."
+    "rootDir": ".",
+    // The build scripts are plain .mjs and stay that way -- they run under bare
+    // node during releases, with no build step available to them. Letting tsc
+    // read them means the tests that exercise their gates are checked against
+    // the real signatures rather than against a hand-written .d.ts that could
+    // drift from the code it claims to describe.
+    "allowJs": true
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests", "scripts/**/*.mjs"]
 }

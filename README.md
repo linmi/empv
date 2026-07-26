@@ -43,6 +43,7 @@ position/cache/dropped-frame churn is coalesced to at most one notification per
 - Node.js ≥ 18.17 (N-API 9), Electron built on a matching Node-API version
 - A Rust toolchain (stable) — the addon is built from source
 - A dynamically linked, LGPL-compatible libmpv runtime (see below)
+- Cross-building the Windows runtime: MinGW-w64, meson, ninja, nasm
 - Linux: X11 or Xwayland. **Native Wayland is not supported** — empv fails loudly
   when `DISPLAY` is unset.
 
@@ -65,10 +66,13 @@ toolchain is involved either way: the addon is prebuilt, and on macOS so is the
 runtime it loads. Once empv is published, `npm install empv` will pull the right
 platform package on its own.
 
-The Windows package is addon-only. Every libmpv build available for Windows is
-GPL, so bundling one would relicense whatever ships it; put a `libmpv-2.dll`
-beside the installed `empv.node` and Windows finds it, because the loading
-module's own directory is searched first.
+The Windows package carries its libmpv too. Every _prebuilt_ Windows libmpv is
+GPL, so the only way to bundle one was to build it: the release cross-compiles
+mpv 0.41 with MinGW-w64 under `-Dgpl=false` and links every dependency into a
+single `libmpv-2.dll` that imports nothing but Windows itself. mpv only gates
+`cdda`, `dvbin`, `dvdnav`, `jack`, `oss-audio`, `caca`, `direct3d` and `x11`
+behind GPL, and none of those is something a player on Windows needs —
+`win32-desktop`, which is where `--wid` lives, is not gated.
 
 Linux has no prebuilt. It would also be addon-only, since distributions package
 libmpv and the addon links it by soname, but the resolver still looks for the
@@ -116,10 +120,15 @@ How you obtain the runtime differs by platform, and this is currently uneven:
 - **macOS** — `build-runtime:macos` builds mpv + FFmpeg + deps from pinned
   sources under an LGPL configuration and writes a prefix plus a
   `runtime-manifest.json`.
-- **Windows** — `prepare-runtime:windows` fetches a pinned upstream mpv
-  development package. That archive is _compile and test input_: its upstream
-  build configuration is outside this project's LGPL release pipeline, so do not
-  promote it into a release without reviewing its terms.
+- **Windows** — `build-runtime:windows` cross-compiles the same pinned sources
+  with MinGW-w64 and links them into one self-contained `libmpv-2.dll`. It runs
+  on Linux (or any host with the toolchain), not on Windows, because mpv has no
+  MSVC build; the MSVC-built addon links the result through an import library
+  synthesised from the DLL's exports.
+  `prepare-runtime:windows` still exists and fetches a pinned upstream mpv
+  development package, but that archive is _compile and test input only_ — it is
+  a GPL build, and the compile gate uses it because answering "does this still
+  compile" does not justify an hour of cross-compilation.
 - **Linux** — bring your own LGPL-compatible prefix and `stage-runtime` it.
 
 Release builds must use an LGPL-compatible runtime: FFmpeg without
@@ -249,7 +258,11 @@ Know these before adopting:
   `--wid` is implemented. An LGPL Linux runtime would be Wayland-only, so Wayland
   support and an LGPL-clean Linux are the same piece of work.
 - **No native Wayland**, and no verified `linux-arm64` / `win32-arm64` builds.
-- **macOS x64** has a build path but no CI coverage.
+- **No D3D11 on Windows.** mpv gates its D3D11 renderer behind `shaderc` and
+  `spirv-cross`, which would mean cross-building glslang and SPIRV-Tools as
+  well, so `vo=gpu` renders through WGL. Hardware decoding is not lost with it:
+  `gl-dxinterop` is enabled, so DXVA2 frames still reach an OpenGL texture
+  without a copy through system memory.
 
 ## Architecture notes
 
