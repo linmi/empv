@@ -48,6 +48,29 @@ impl From<JsBounds> for wid::Bounds {
     }
 }
 
+// Which side of the web contents the video composites on.
+//
+// It arrives as a string because that is what crosses the N-API boundary, and it
+// was compared against "overlay" at each call site with everything else falling
+// through to underlay. That made a typo mean underlay, silently, on the one
+// backend where underlay exists -- and on the backend where it does not exist,
+// meant the whole field was read and discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZOrder {
+    Overlay,
+    Underlay,
+}
+
+pub fn parse_z_order(raw: &str) -> Result<ZOrder, String> {
+    match raw {
+        "overlay" => Ok(ZOrder::Overlay),
+        "underlay" => Ok(ZOrder::Underlay),
+        other => Err(format!(
+            "Unknown presenter zOrder {other:?}; expected \"overlay\" or \"underlay\"."
+        )),
+    }
+}
+
 #[napi(object)]
 pub struct JsAttachOptions {
     pub x: f64,
@@ -294,6 +317,28 @@ fn explicit_null<T>(value: Option<T>) -> Either<T, Null> {
 mod tests {
     use super::*;
     use crate::session::snapshot::SessionSnapshot;
+
+    #[test]
+    fn z_order_accepts_exactly_the_two_documented_values() {
+        assert_eq!(parse_z_order("overlay"), Ok(ZOrder::Overlay));
+        assert_eq!(parse_z_order("underlay"), Ok(ZOrder::Underlay));
+    }
+
+    // The old comparison was `== "overlay"`, so anything else -- a typo, a value
+    // from a newer caller, an empty string -- became underlay without a word.
+    // Compositing the video on the wrong side of the web contents is visible;
+    // being told nothing about why is what made it expensive.
+    #[test]
+    fn an_unrecognised_z_order_is_refused_rather_than_read_as_underlay() {
+        for raw in ["", "Overlay", "under", "underlay ", "0"] {
+            let parsed = parse_z_order(raw);
+            assert!(parsed.is_err(), "{raw:?} was accepted as {parsed:?}");
+            assert!(
+                parsed.unwrap_err().contains(raw),
+                "the error must name the value it refused"
+            );
+        }
+    }
 
     #[test]
     fn default_snapshot_distinguishes_explicit_null_from_omitted_fields() {

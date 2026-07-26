@@ -21,6 +21,7 @@ export {
   type LibMpvVideoAdjustments,
   type LibMpvVideoLayerAttachOptions,
   type LibMpvVideoLayerBounds,
+  type LibMpvWindowAttachOptions,
   type LibMpvVideoLayerZOrder,
   type LibMpvWindowAddon,
   type LoadedEmbeddedLibMpvAddon,

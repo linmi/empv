@@ -30,11 +30,7 @@ unsafe extern "C" {
         parent: usize,
         out_scale: *mut c_double,
     ) -> c_int;
-    fn empv_wid_presenter_prepare_child(
-        presenter: *mut c_void,
-        child: usize,
-        overlay: c_int,
-    ) -> c_int;
+    fn empv_wid_presenter_prepare_child(presenter: *mut c_void, child: usize) -> c_int;
     fn empv_wid_presenter_attach(presenter: *mut c_void, parent: usize, child: usize) -> c_int;
     fn empv_wid_presenter_set_bounds(
         presenter: *mut c_void,
@@ -161,7 +157,6 @@ struct PresenterState {
     parent: Option<usize>,
     child: Option<usize>,
     bounds: Bounds,
-    overlay: bool,
     scale: f64,
     suspended: bool,
     attached: bool,
@@ -185,7 +180,6 @@ impl VideoPresenter {
                         width: 1.0,
                         height: 1.0,
                     },
-                    overlay: false,
                     scale: 1.0,
                     suspended: false,
                     attached: false,
@@ -194,7 +188,7 @@ impl VideoPresenter {
         }
     }
 
-    pub fn configure(&self, parent: usize, bounds: Bounds, overlay: bool) -> WidResult<RenderSize> {
+    pub fn configure(&self, parent: usize, bounds: Bounds) -> WidResult<RenderSize> {
         self.ensure_creator_thread()?;
         validate_handle(parent, "parent")?;
         validate_bounds(bounds)?;
@@ -211,24 +205,15 @@ impl VideoPresenter {
                  refusing to replace it with {parent}."
             ));
         }
-        if state.attached && state.overlay != overlay {
-            return Err(
-                "Native video presenter overlay mode cannot change after attachment.".to_owned(),
-            );
-        }
-
         let old_bounds = state.bounds;
-        let old_overlay = state.overlay;
         let old_scale = state.scale;
         state.parent = Some(parent);
         state.bounds = bounds;
-        state.overlay = overlay;
         state.scale = scale;
 
         if state.attached {
             if let Err(error) = platform_set_bounds(pointer, &state, false) {
                 state.bounds = old_bounds;
-                state.overlay = old_overlay;
                 state.scale = old_scale;
                 return Err(with_rollback(
                     error,
@@ -390,7 +375,7 @@ fn reconcile(pointer: *mut c_void, state: &mut PresenterState) -> WidResult<()> 
     };
 
     check_operation(
-        unsafe { empv_wid_presenter_prepare_child(pointer, child, i32::from(state.overlay)) },
+        unsafe { empv_wid_presenter_prepare_child(pointer, child) },
         "Failed to prepare the embedded MPV child window",
     )?;
 

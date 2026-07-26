@@ -208,11 +208,30 @@ const client = createEmpvRuntimeClient({
 // presenter -- session control does not require it.
 const host = await createEmpvPlaybackHost({ client, frameLinkServiceName })
 
-const { sessionId } = await client.invoke('createSession', { options: { volume: 1 } })
-const renderSize = host.createPresenter(sessionId, window.getNativeWindowHandle(), {
-  ...bounds,
-  zOrder: 'underlay'
+const { sessionId, videoWindowHandle } = await client.invoke('createSession', {
+  options: { volume: 1 }
 })
+
+// Branch before creating the presenter. The two backends take different attach
+// options -- only 'layer' can composite beneath the web contents -- so on the
+// union nothing backend-specific is callable.
+const renderSize =
+  host.presentationKind === 'layer'
+    ? host.createPresenter(sessionId, window.getNativeWindowHandle(), {
+        ...bounds,
+        zOrder: 'underlay'
+      })
+    : host.createPresenter(sessionId, window.getNativeWindowHandle(), {
+        ...bounds,
+        zOrder: 'overlay'
+      })
+
+// 'window' renders into an OS child window the utility owns; the presenter has
+// to adopt it before anything appears.
+if (host.presentationKind === 'window' && videoWindowHandle !== null) {
+  host.adoptVideoWindow(sessionId, videoWindowHandle)
+}
+
 host.bindSessionToPresenter(sessionId, sessionId)
 
 await client.invoke('setRenderSize', sessionId, renderSize.widthPixels, renderSize.heightPixels)
@@ -226,6 +245,11 @@ client.onExit((error, activeSessionIds) => recover(error, activeSessionIds))
 Frames never appear in your code: the host turns each one into the right
 `presentSurface` call for whichever presenter the session is bound to, and drops
 frames for sessions that are not bound. Unbind before destroying a presenter.
+
+`zOrder: 'underlay'` exists only on `layer`. The `window` backend reparents an OS
+child window, which always composites above the web contents its parent draws, so
+its attach options cannot express an underlay and the addon refuses one. Branching
+on `presentationKind` is what makes that a compile error rather than a surprise.
 
 The protocol methods are the addon's own -- `seek`, `setVolume`, `playlistSync`
 -- because the contract is derived from the addon interface rather than restated.

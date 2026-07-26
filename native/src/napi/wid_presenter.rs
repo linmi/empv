@@ -7,7 +7,7 @@ use napi_derive::napi;
 use crate::presentation::wid::{RenderSize, VideoPresenter};
 use crate::session::registry::{self, Presenter};
 
-use super::dto::{JsAttachOptions, JsBounds, JsRenderSize};
+use super::dto::{JsAttachOptions, JsBounds, JsRenderSize, ZOrder, parse_z_order};
 
 fn error(reason: String) -> Error {
     Error::from_reason(reason)
@@ -37,8 +37,21 @@ pub fn create_presenter(
     options: JsAttachOptions,
 ) -> Result<JsRenderSize> {
     let parent = window_handle(&window_handle_buffer)?;
+    // This backend composites an OS child window into the app window, and a child
+    // window is always above the web contents its parent draws. There is no
+    // underlay here to ask for. The field used to be read and thrown away in the
+    // native shim, so a caller that asked for underlay got overlay and no signal
+    // that its request had not survived the crossing.
+    if parse_z_order(&options.z_order).map_err(error)? == ZOrder::Underlay {
+        return Err(error(
+            "The 'window' presentation backend composites an OS child window, which is always \
+             above the web contents: zOrder 'underlay' cannot be honoured here. Use 'overlay', \
+             or branch on getPresentationKind() -- only 'layer' can composite beneath."
+                .to_owned(),
+        ));
+    }
     let host = VideoPresenter::create().map_err(error)?;
-    let size = match host.configure(parent, options.bounds(), options.z_order == "overlay") {
+    let size = match host.configure(parent, options.bounds()) {
         Ok(size) => size,
         Err(reason) => {
             let _ = host.close();

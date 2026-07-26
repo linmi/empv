@@ -76,8 +76,7 @@ int32_t empv_wid_presenter_query_scale(
  */
 int32_t empv_wid_presenter_prepare_child(
     EmpvWidPresenter* presenter,
-    uintptr_t child_handle,
-    int32_t overlay) EMPV_WID_NOEXCEPT;
+    uintptr_t child_handle) EMPV_WID_NOEXCEPT;
 int32_t empv_wid_presenter_attach(
     EmpvWidPresenter* presenter,
     uintptr_t parent_handle,

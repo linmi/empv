@@ -148,6 +148,18 @@ export type LibMpvVideoLayerAttachOptions = LibMpvVideoLayerBounds & {
   zOrder: LibMpvVideoLayerZOrder
 }
 
+// The 'window' backend composites an OS child window into the app window, and a
+// child window is always above the web contents its parent draws. There is no
+// underlay to ask for, so its attach options cannot express one.
+//
+// This is a separate type rather than a runtime check alone because the addon
+// used to accept 'underlay' here, carry it through Rust, and discard it in the
+// native shim -- the caller got overlay and no indication its request had not
+// survived. The addon now refuses it; this makes the refusal visible to tsc.
+export type LibMpvWindowAttachOptions = LibMpvVideoLayerBounds & {
+  zOrder: 'overlay'
+}
+
 export type LibMpvCapturedFrame = {
   data: Buffer
   heightPixels: number
@@ -314,11 +326,10 @@ export type LibMpvEmbeddedCoreAddon = {
   // session must size to. On 'layer' this attaches a CALayer; on
   // 'window' it stores the parent window + bounds and reparents the session's
   // video window once adoptVideoWindow supplies the child handle.
-  createPresenter(
-    presenterId: string,
-    windowHandle: Buffer,
-    options: LibMpvVideoLayerAttachOptions
-  ): LibMpvRenderSize
+  // createPresenter is NOT here: the two backends take different attach options,
+  // and an intersection type cannot narrow a member the core already declares --
+  // it would add an overload and leave the permissive one callable. Each facet
+  // declares its own.
   setPresenterBounds(presenterId: string, bounds: LibMpvVideoLayerBounds): LibMpvRenderSize
   // Re-derives render pixel size from the hosting window's current DPI. Called
   // when a window moves to a display with a different DPI, where the renderer's
@@ -337,6 +348,13 @@ export type LibMpvEmbeddedCoreAddon = {
 // CALayer presenter over a mach frame link.
 export type LibMpvLayerAddon = LibMpvEmbeddedCoreAddon & {
   getPresentationKind(): 'layer'
+  // Composites either side of the web contents: a CALayer can sit beneath
+  // punched-transparent page regions.
+  createPresenter(
+    presenterId: string,
+    windowHandle: Buffer,
+    options: LibMpvVideoLayerAttachOptions
+  ): LibMpvRenderSize
   // Sets the mach bootstrap service name the utility uses to reach the
   // main-process frame-link receiver (the name the main process registered via
   // startPresenterLink). Must be called before any session is created; the send
@@ -381,6 +399,12 @@ export type LibMpvLayerAddon = LibMpvEmbeddedCoreAddon & {
 // link exists, so the mach-link functions are absent by design.
 export type LibMpvWindowAddon = LibMpvEmbeddedCoreAddon & {
   getPresentationKind(): 'window'
+  // Overlay only. See LibMpvWindowAttachOptions.
+  createPresenter(
+    presenterId: string,
+    windowHandle: Buffer,
+    options: LibMpvWindowAttachOptions
+  ): LibMpvRenderSize
   // The session's video window handle (HWND / X11 window id, as a number), read
   // by the utility runtime and shipped to the main process. null when the
   // session is unknown or has no window yet.

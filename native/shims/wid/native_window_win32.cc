@@ -230,11 +230,12 @@ public:
         return true;
     }
 
-    bool prepareChild(
-        uintptr_t childHandle,
-        bool overlay) const noexcept
+    // No z-order parameter: a child window composites above the web contents its
+    // parent draws, and nothing here can change that. It used to take one and
+    // discard it, which meant a caller asking for underlay got overlay in silence.
+    // The refusal now happens at the N-API boundary, where it can be reported.
+    bool prepareChild(uintptr_t childHandle) const noexcept
     {
-        (void)overlay;
         HWND child = reinterpret_cast<HWND>(childHandle);
         if (!child || !IsWindow(child)) {
             setError("WID presenter cannot prepare an invalid Win32 child.");
@@ -556,15 +557,14 @@ extern "C" int32_t empv_wid_presenter_query_scale(
 
 extern "C" int32_t empv_wid_presenter_prepare_child(
     EmpvWidPresenter* presenter,
-    uintptr_t childHandle,
-    int32_t overlay) noexcept
+    uintptr_t childHandle) noexcept
 {
     return statusBoundary([=]() {
         if (!presenter) {
             setError("WID presenter is null.");
             return false;
         }
-        return presenter->platform.prepareChild(childHandle, overlay != 0);
+        return presenter->platform.prepareChild(childHandle);
     });
 }
 

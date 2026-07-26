@@ -5,6 +5,7 @@ import {
   type LibMpvRenderSize,
   type LibMpvVideoLayerAttachOptions,
   type LibMpvVideoLayerBounds,
+  type LibMpvWindowAttachOptions,
   type LoadedEmbeddedLibMpvAddon
 } from '../embedded.ts'
 
@@ -60,11 +61,8 @@ type EmpvPlaybackHostCore = {
   bindSessionToPresenter(sessionId: string, presenterId: string): void
   unbindSession(sessionId: string): void
   // --- Presenter API, main process only ---
-  createPresenter(
-    presenterId: string,
-    windowHandle: Buffer,
-    options: LibMpvVideoLayerAttachOptions
-  ): LibMpvRenderSize
+  // createPresenter lives on each facet, not here: the backends take different
+  // attach options and an intersection cannot narrow what the core declares.
   setPresenterBounds(presenterId: string, bounds: LibMpvVideoLayerBounds): LibMpvRenderSize
   refreshPresenterScale(presenterId: string): LibMpvRenderSize
   setPresenterSuspended(presenterId: string, suspended: boolean): void
@@ -76,12 +74,25 @@ type EmpvPlaybackHostCore = {
 // branches on presentationKind to reach the half that exists.
 export type EmpvLayerHost = EmpvPlaybackHostCore & {
   readonly presentationKind: 'layer'
+  createPresenter(
+    presenterId: string,
+    windowHandle: Buffer,
+    options: LibMpvVideoLayerAttachOptions
+  ): LibMpvRenderSize
   observeWindowOcclusion(windowHandle: Buffer, onChange: (visible: boolean) => void): void
   unobserveWindowOcclusion(windowHandle: Buffer): void
 }
 
 export type EmpvWindowHost = EmpvPlaybackHostCore & {
   readonly presentationKind: 'window'
+  // Overlay only: this backend reparents an OS child window, which composites
+  // above the web contents. The addon refuses 'underlay'; this refuses it at
+  // compile time.
+  createPresenter(
+    presenterId: string,
+    windowHandle: Buffer,
+    options: LibMpvWindowAttachOptions
+  ): LibMpvRenderSize
   adoptVideoWindow(presenterId: string, childWindowHandle: number): void
 }
 
@@ -163,8 +174,6 @@ export async function createEmpvPlaybackHost(
     unbindSession(sessionId) {
       presenterBySession.delete(sessionId)
     },
-    createPresenter: (presenterId, windowHandle, attachOptions) =>
-      addon.createPresenter(presenterId, windowHandle, attachOptions),
     setPresenterBounds: (presenterId, bounds) => addon.setPresenterBounds(presenterId, bounds),
     refreshPresenterScale: (presenterId) => addon.refreshPresenterScale(presenterId),
     setPresenterSuspended: (presenterId, suspended) =>
@@ -178,6 +187,8 @@ export async function createEmpvPlaybackHost(
     return {
       ...core,
       presentationKind: 'layer',
+      createPresenter: (presenterId, windowHandle, attachOptions) =>
+        machAddon.createPresenter(presenterId, windowHandle, attachOptions),
       observeWindowOcclusion: (windowHandle, onChange) =>
         machAddon.observeWindowOcclusion(windowHandle, onChange),
       unobserveWindowOcclusion: (windowHandle) => machAddon.unobserveWindowOcclusion(windowHandle)
@@ -188,6 +199,8 @@ export async function createEmpvPlaybackHost(
   return {
     ...core,
     presentationKind: 'window',
+    createPresenter: (presenterId, windowHandle, attachOptions) =>
+      widAddon.createPresenter(presenterId, windowHandle, attachOptions),
     adoptVideoWindow: (presenterId, childWindowHandle) =>
       widAddon.adoptVideoWindow(presenterId, childWindowHandle)
   }

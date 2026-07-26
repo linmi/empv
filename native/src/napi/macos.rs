@@ -20,6 +20,7 @@ use crate::session::{runtime, snapshot::SessionSnapshot};
 
 use super::dto::{
     JsAttachOptions, JsBounds, JsCapturedFrame, JsRenderSize, JsSessionOptions, JsSessionSnapshot,
+    ZOrder, parse_z_order,
 };
 
 type OcclusionSink =
@@ -329,8 +330,8 @@ pub fn create_presenter(
 ) -> Result<JsRenderSize> {
     let window = window_handle(&window_handle_buffer)?;
     let bounds = options.macos_bounds();
-    let (host, size) =
-        VideoPresenter::create(window, options.z_order == "overlay", bounds).map_err(napi_error)?;
+    let overlay = parse_z_order(&options.z_order).map_err(napi_error)? == ZOrder::Overlay;
+    let (host, size) = VideoPresenter::create(window, overlay, bounds).map_err(napi_error)?;
     let presenter = Arc::new(Presenter {
         host,
         state: Mutex::new(MacPresenterState::new(bounds)),
