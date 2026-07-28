@@ -291,8 +291,12 @@ client.onSnapshot(({ snapshot }) => render(snapshot))
 Frames never appear in your code: the host turns each one into the right
 `presentSurface` call for whichever presenter the session is bound to, and drops
 frames for sessions that are not bound. `destroyPresenter` removes that binding
-before native teardown begins; `dispose` tears down every remaining presenter,
-the frame listener, and the macOS frame link.
+before native teardown begins. If native teardown fails, the presenter remains
+owned in an explicit cleanup-only state: frame delivery and ordinary presenter
+operations stay disabled, while another `destroyPresenter` or final `dispose`
+call can retry cleanup. `dispose` exhaustively attempts every remaining
+presenter, the frame listener, and the macOS frame link; failed steps remain
+retryable and successful disposal is idempotent.
 
 `zOrder: 'underlay'` exists only on `layer`. The `window` backend reparents an OS
 child window, which always composites above the web contents its parent draws, so

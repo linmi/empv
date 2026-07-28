@@ -70,6 +70,8 @@ pub struct Presenter {
 enum PresenterEntry<T> {
     Creating,
     Active(T),
+    Destroying(T),
+    DestroyFailed(T),
 }
 
 static SESSIONS: OnceLock<Mutex<HashMap<String, Arc<Session>>>> = OnceLock::new();
@@ -182,7 +184,7 @@ fn cancel_presenter_reservation<T>(entries: &mut HashMap<String, PresenterEntry<
     }
 }
 
-fn take_presenter_entry<T>(
+fn begin_presenter_destroy<T: Clone>(
     entries: &mut HashMap<String, PresenterEntry<T>>,
     id: &str,
 ) -> Result<Option<T>, String> {
@@ -191,10 +193,60 @@ fn take_presenter_entry<T>(
         Entry::Occupied(entry) if matches!(entry.get(), PresenterEntry::Creating) => Err(format!(
             "Embedded MPV presenter {id} cannot be destroyed while creation is in progress."
         )),
-        Entry::Occupied(entry) => match entry.remove() {
-            PresenterEntry::Active(presenter) => Ok(Some(presenter)),
-            PresenterEntry::Creating => unreachable!("creating presenter handled above"),
-        },
+        Entry::Occupied(entry) if matches!(entry.get(), PresenterEntry::Destroying(_)) => Err(
+            format!("Embedded MPV presenter {id} destruction is already in progress."),
+        ),
+        Entry::Occupied(mut entry) => {
+            let presenter = match entry.get() {
+                PresenterEntry::Active(presenter) | PresenterEntry::DestroyFailed(presenter) => {
+                    presenter.clone()
+                }
+                PresenterEntry::Creating | PresenterEntry::Destroying(_) => {
+                    unreachable!("creating and destroying presenters handled above")
+                }
+            };
+            entry.insert(PresenterEntry::Destroying(presenter.clone()));
+            Ok(Some(presenter))
+        }
+    }
+}
+
+fn finish_presenter_destroy<T>(
+    entries: &mut HashMap<String, PresenterEntry<T>>,
+    id: &str,
+) -> Result<(), String> {
+    match entries.remove(id) {
+        Some(PresenterEntry::Destroying(_)) => Ok(()),
+        Some(entry) => {
+            entries.insert(id.to_owned(), entry);
+            Err(format!(
+                "Embedded MPV presenter {id} cannot finish destruction because its registry entry is not being destroyed."
+            ))
+        }
+        None => Err(format!(
+            "Embedded MPV presenter {id} cannot finish destruction because its registry entry is missing."
+        )),
+    }
+}
+
+fn fail_presenter_destroy<T>(
+    entries: &mut HashMap<String, PresenterEntry<T>>,
+    id: &str,
+) -> Result<(), String> {
+    match entries.remove(id) {
+        Some(PresenterEntry::Destroying(presenter)) => {
+            entries.insert(id.to_owned(), PresenterEntry::DestroyFailed(presenter));
+            Ok(())
+        }
+        Some(entry) => {
+            entries.insert(id.to_owned(), entry);
+            Err(format!(
+                "Embedded MPV presenter {id} cannot record a destruction failure because its registry entry is not being destroyed."
+            ))
+        }
+        None => Err(format!(
+            "Embedded MPV presenter {id} cannot record a destruction failure because its registry entry is missing."
+        )),
     }
 }
 
@@ -246,7 +298,12 @@ pub fn find_presenter(id: &str) -> Result<Option<Arc<Presenter>>, String> {
         .map_err(|_| "Embedded MPV presenter registry lock was poisoned.".to_owned())?;
     Ok(match presenters.get(id) {
         Some(PresenterEntry::Active(presenter)) => Some(presenter.clone()),
-        Some(PresenterEntry::Creating) | None => None,
+        Some(
+            PresenterEntry::Creating
+            | PresenterEntry::Destroying(_)
+            | PresenterEntry::DestroyFailed(_),
+        )
+        | None => None,
     })
 }
 
@@ -259,22 +316,79 @@ pub fn get_presenter(id: &str) -> Result<Arc<Presenter>, String> {
         Some(PresenterEntry::Creating) => Err(format!(
             "Embedded MPV presenter {id} is still being created."
         )),
+        Some(PresenterEntry::Destroying(_)) => Err(format!(
+            "Embedded MPV presenter {id} destruction is in progress."
+        )),
+        Some(PresenterEntry::DestroyFailed(_)) => Err(format!(
+            "Embedded MPV presenter {id} cannot be used because its previous destruction failed; retry destroyPresenter."
+        )),
         None => Err(format!("Embedded MPV presenter {id} does not exist.")),
     }
 }
 
-pub fn remove_presenter(id: &str) -> Result<Option<Arc<Presenter>>, String> {
+pub struct PresenterDestroyReservation {
+    id: String,
+    presenter: Arc<Presenter>,
+    completed: bool,
+}
+
+impl PresenterDestroyReservation {
+    pub fn presenter(&self) -> &Presenter {
+        &self.presenter
+    }
+
+    pub fn commit(mut self) -> Result<(), String> {
+        let mut presenters = presenters()
+            .lock()
+            .map_err(|_| "Embedded MPV presenter registry lock was poisoned.".to_owned())?;
+        finish_presenter_destroy(&mut presenters, &self.id)?;
+        self.completed = true;
+        Ok(())
+    }
+
+    pub fn record_failure(mut self) -> Result<(), String> {
+        let mut presenters = presenters()
+            .lock()
+            .map_err(|_| "Embedded MPV presenter registry lock was poisoned.".to_owned())?;
+        fail_presenter_destroy(&mut presenters, &self.id)?;
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for PresenterDestroyReservation {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        if let Ok(mut presenters) = presenters().lock() {
+            let _ = fail_presenter_destroy(&mut presenters, &self.id);
+        }
+    }
+}
+
+pub fn begin_presenter_destruction(
+    id: &str,
+) -> Result<Option<PresenterDestroyReservation>, String> {
     let mut presenters = presenters()
         .lock()
         .map_err(|_| "Embedded MPV presenter registry lock was poisoned.".to_owned())?;
-    take_presenter_entry(&mut presenters, id)
+    let Some(presenter) = begin_presenter_destroy(&mut presenters, id)? else {
+        return Ok(None);
+    };
+    Ok(Some(PresenterDestroyReservation {
+        id: id.to_owned(),
+        presenter,
+        completed: false,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        PresenterEntry, cancel_presenter_reservation, commit_presenter_entry,
-        reserve_presenter_entry, take_presenter_entry,
+        PresenterEntry, begin_presenter_destroy, cancel_presenter_reservation,
+        commit_presenter_entry, fail_presenter_destroy, finish_presenter_destroy,
+        reserve_presenter_entry,
     };
     use std::collections::HashMap;
 
@@ -309,11 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn destroy_is_terminal_and_refuses_an_incomplete_creation() {
+    fn destruction_refuses_incomplete_creation_and_concurrent_attempts() {
         let mut entries = HashMap::new();
         reserve_presenter_entry(&mut entries, "creating".to_owned()).expect("reserve presenter");
         assert!(
-            take_presenter_entry(&mut entries, "creating")
+            begin_presenter_destroy(&mut entries, "creating")
                 .expect_err("creating presenter must not be removed")
                 .contains("creation is in progress")
         );
@@ -321,12 +435,38 @@ mod tests {
         cancel_presenter_reservation(&mut entries, "creating");
         entries.insert("active".to_owned(), PresenterEntry::Active("presenter"));
         assert_eq!(
-            take_presenter_entry(&mut entries, "active").expect("take active presenter"),
+            begin_presenter_destroy(&mut entries, "active").expect("begin presenter destruction"),
             Some("presenter")
         );
+        assert!(
+            begin_presenter_destroy(&mut entries, "active")
+                .expect_err("concurrent destruction must fail")
+                .contains("already in progress")
+        );
+    }
+
+    #[test]
+    fn failed_destruction_preserves_only_retryable_cleanup_ownership() {
+        let mut entries = HashMap::new();
+        entries.insert("active".to_owned(), PresenterEntry::Active("presenter"));
         assert_eq!(
-            take_presenter_entry::<&str>(&mut entries, "active")
-                .expect("repeat destroy is idempotent"),
+            begin_presenter_destroy(&mut entries, "active").expect("begin presenter destruction"),
+            Some("presenter")
+        );
+        fail_presenter_destroy(&mut entries, "active").expect("record destruction failure");
+        assert!(matches!(
+            entries.get("active"),
+            Some(PresenterEntry::DestroyFailed("presenter"))
+        ));
+
+        assert_eq!(
+            begin_presenter_destroy(&mut entries, "active").expect("retry presenter destruction"),
+            Some("presenter")
+        );
+        finish_presenter_destroy(&mut entries, "active").expect("finish presenter destruction");
+        assert_eq!(
+            begin_presenter_destroy::<&str>(&mut entries, "active")
+                .expect("destroyed presenter is absent"),
             None
         );
     }

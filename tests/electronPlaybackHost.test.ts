@@ -363,6 +363,68 @@ describe('createEmpvPlaybackHost', () => {
     )
   })
 
+  test('retains failed presenter destruction as cleanup-only ownership and allows an explicit retry', async () => {
+    const fakeClient = makeFakeRuntimeClient()
+    let destructionAttempts = 0
+    const { loaded, calls } = makeLayerAddon({
+      destroyPresenter: () => {
+        destructionAttempts += 1
+        if (destructionAttempts === 1) {
+          throw new Error('native detach failed')
+        }
+      }
+    })
+    const host = await createEmpvPlaybackHost({
+      client: fakeClient.client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName(),
+      loadAddon: async () => loaded
+    })
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    const options = {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay' as const
+    }
+    host.createPresenter('presenter-1', WINDOW_HANDLE, options)
+    host.bindSessionToPresenter('session-1', 'presenter-1')
+
+    assert.throws(() => host.destroyPresenter('presenter-1'), /native detach failed/)
+    assert.throws(
+      () => host.setPresenterBounds('presenter-1', options),
+      /retained only for cleanup.*retry destroyPresenter/
+    )
+    assert.throws(
+      () => host.createPresenter('presenter-1', WINDOW_HANDLE, options),
+      /duplicate empv presenter presenter-1/
+    )
+    fakeClient.emitFrame({
+      sessionId: 'session-1',
+      surfaceIndex: 0,
+      poolGeneration: 1,
+      contentGeneration: 1
+    })
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'presentSurface'),
+      [],
+      'A failed native destroy must not restore frame routing to uncertain native state.'
+    )
+
+    host.destroyPresenter('presenter-1')
+    assert.equal(
+      calls.filter((call) => call.method === 'destroyPresenter').length,
+      2,
+      'The retained cleanup ownership must reach native destruction again.'
+    )
+    assert.throws(
+      () => host.destroyPresenter('presenter-1'),
+      /presenter presenter-1 does not exist/
+    )
+  })
+
   test('disposes every presenter, the frame listener and the layer link exactly once', async () => {
     const fakeClient = makeFakeRuntimeClient()
     const { loaded, calls } = makeLayerAddon()
@@ -405,10 +467,79 @@ describe('createEmpvPlaybackHost', () => {
       calls.filter((call) => call.method === 'presentSurface'),
       []
     )
-    assert.throws(() => host.dispose(), /playback host is disposed/)
+    host.dispose()
+    assert.equal(calls.filter((call) => call.method === 'destroyPresenter').length, 2)
+    assert.equal(calls.filter((call) => call.method === 'stopPresenterLink').length, 1)
     assert.throws(
       () => host.setPresenterBounds('presenter-1', options),
       /playback host is disposed/
+    )
+  })
+
+  test('retries only unfinished host cleanup after disposal fails', async () => {
+    let firstPresenterAttempt = true
+    const { loaded, calls } = makeLayerAddon({
+      destroyPresenter: (presenterId) => {
+        if (presenterId === 'presenter-1' && firstPresenterAttempt) {
+          firstPresenterAttempt = false
+          throw new Error('presenter-1 detach failed')
+        }
+      }
+    })
+    const host = await createEmpvPlaybackHost({
+      client: makeFakeRuntimeClient().client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName(),
+      loadAddon: async () => loaded
+    })
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    const options = {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay' as const
+    }
+    host.createPresenter('presenter-1', WINDOW_HANDLE, options)
+    host.createPresenter('presenter-2', WINDOW_HANDLE, options)
+
+    assert.throws(
+      () => host.dispose(),
+      (error: unknown) => {
+        assert.ok(error instanceof AggregateError)
+        assert.equal(error.errors.length, 1)
+        assert.match(String(error.errors[0]), /presenter-1 detach failed/)
+        return true
+      }
+    )
+    assert.throws(
+      () => host.setPresenterBounds('presenter-2', options),
+      /lifecycle is cleanup-required/
+    )
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'destroyPresenter'),
+      [
+        { method: 'destroyPresenter', args: ['presenter-1'] },
+        { method: 'destroyPresenter', args: ['presenter-2'] }
+      ]
+    )
+    assert.equal(calls.filter((call) => call.method === 'stopPresenterLink').length, 1)
+
+    host.dispose()
+    host.dispose()
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'destroyPresenter'),
+      [
+        { method: 'destroyPresenter', args: ['presenter-1'] },
+        { method: 'destroyPresenter', args: ['presenter-2'] },
+        { method: 'destroyPresenter', args: ['presenter-1'] }
+      ]
+    )
+    assert.equal(
+      calls.filter((call) => call.method === 'stopPresenterLink').length,
+      1,
+      'A completed cleanup step must not run again during a presenter retry.'
     )
   })
 

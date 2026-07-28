@@ -409,10 +409,20 @@ pub fn present_surface(
 }
 
 pub fn destroy_presenter(presenter_id: String) -> Result<()> {
-    let Some(presenter) = registry::remove_presenter(&presenter_id).map_err(napi_error)? else {
+    let Some(destruction) =
+        registry::begin_presenter_destruction(&presenter_id).map_err(napi_error)?
+    else {
         return Ok(());
     };
-    presenter.host.close().map_err(napi_error)
+    match destruction.presenter().host.close() {
+        Ok(()) => destruction.commit().map_err(napi_error),
+        Err(reason) => match destruction.record_failure() {
+            Ok(()) => Err(napi_error(reason)),
+            Err(registry_reason) => Err(napi_error(format!(
+                "{reason} Failed to retain retryable presenter cleanup ownership: {registry_reason}"
+            ))),
+        },
+    }
 }
 
 #[derive(Default)]

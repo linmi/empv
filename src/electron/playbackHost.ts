@@ -66,12 +66,14 @@ type EmpvPlaybackHostCore = {
   refreshPresenterScale(presenterId: string): LibMpvRenderSize
   setPresenterSuspended(presenterId: string, suspended: boolean): void
   // Removes the frame binding before native destruction, so a late frame can
-  // never target a presenter whose teardown has begun.
+  // never target a presenter whose teardown has begun. A failed native destroy
+  // retains cleanup-only ownership so the caller or final host disposal can retry.
   destroyPresenter(presenterId: string): void
   setWindowBackdrop(windowHandle: Buffer, color: string | null): void
   // Final host teardown. Destroys every owned presenter, removes the frame
   // listener and (on layer) stops the mach receiver. Cleanup is exhaustive:
-  // every step runs and all failures are reported together.
+  // every step runs and all failures are reported together. Failed steps remain
+  // retryable through another dispose call; a completed disposal is idempotent.
   dispose(): void
 }
 
@@ -146,14 +148,22 @@ export async function createEmpvPlaybackHost(
   // reparents an OS video window instead -- no link, no presentSurface. A failed
   // registration throws here rather than leaving frames with nowhere to land.
   const presenterIds = new Set<string>()
+  const failedPresenterIds = new Set<string>()
   const presenterBySession = new Map<string, string>()
   const sessionByPresenter = new Map<string, string>()
-  let disposed = false
+  let lifecycle: 'open' | 'disposing' | 'cleanup-required' | 'disposed' = 'open'
   let removeFrameListener = (): void => {}
+  let frameListenerRemoved = false
+  let presenterLinkStopped = loaded.presentationKind !== 'layer'
 
   function assertOpen(operation: string): void {
-    if (disposed) {
+    if (lifecycle === 'disposed') {
       throw new Error(`Cannot ${operation}: the empv playback host is disposed.`)
+    }
+    if (lifecycle !== 'open') {
+      throw new Error(
+        `Cannot ${operation}: the empv playback host lifecycle is ${lifecycle}; only dispose may continue cleanup.`
+      )
     }
   }
 
@@ -174,6 +184,11 @@ export async function createEmpvPlaybackHost(
   function requirePresenter(presenterId: string, operation: string): void {
     if (!presenterIds.has(presenterId)) {
       throw new Error(`Cannot ${operation}: empv presenter ${presenterId} does not exist.`)
+    }
+    if (failedPresenterIds.has(presenterId)) {
+      throw new Error(
+        `Cannot ${operation}: empv presenter ${presenterId} is retained only for cleanup because its previous destruction failed; retry destroyPresenter.`
+      )
     }
   }
 
@@ -247,52 +262,73 @@ export async function createEmpvPlaybackHost(
     },
     destroyPresenter(presenterId) {
       assertOpen('destroy a presenter')
-      requirePresenter(presenterId, 'destroy a presenter')
-      presenterIds.delete(presenterId)
+      if (!presenterIds.has(presenterId)) {
+        throw new Error(`Cannot destroy a presenter: empv presenter ${presenterId} does not exist.`)
+      }
       const sessionId = sessionByPresenter.get(presenterId)
       if (sessionId !== undefined) {
         sessionByPresenter.delete(presenterId)
         presenterBySession.delete(sessionId)
       }
-      addon.destroyPresenter(presenterId)
+      try {
+        addon.destroyPresenter(presenterId)
+      } catch (error) {
+        failedPresenterIds.add(presenterId)
+        throw error
+      }
+      failedPresenterIds.delete(presenterId)
+      presenterIds.delete(presenterId)
     },
     setWindowBackdrop(windowHandle, color) {
       assertOpen('set a window backdrop')
       addon.setWindowBackdrop(windowHandle, color)
     },
     dispose() {
-      assertOpen('dispose the playback host')
-      disposed = true
+      if (lifecycle === 'disposed') {
+        return
+      }
+      if (lifecycle === 'disposing') {
+        throw new Error('Cannot dispose the empv playback host reentrantly.')
+      }
+      lifecycle = 'disposing'
 
       const failures: unknown[] = []
       presenterBySession.clear()
       sessionByPresenter.clear()
       const ownedPresenterIds = [...presenterIds]
-      presenterIds.clear()
 
       for (const presenterId of ownedPresenterIds) {
         try {
           addon.destroyPresenter(presenterId)
+          failedPresenterIds.delete(presenterId)
+          presenterIds.delete(presenterId)
+        } catch (error) {
+          failedPresenterIds.add(presenterId)
+          failures.push(error)
+        }
+      }
+      if (!frameListenerRemoved) {
+        try {
+          removeFrameListener()
+          frameListenerRemoved = true
         } catch (error) {
           failures.push(error)
         }
       }
-      try {
-        removeFrameListener()
-      } catch (error) {
-        failures.push(error)
-      }
-      if (loaded.presentationKind === 'layer') {
+      if (loaded.presentationKind === 'layer' && !presenterLinkStopped) {
         try {
           loaded.addon.stopPresenterLink()
+          presenterLinkStopped = true
         } catch (error) {
           failures.push(error)
         }
       }
 
       if (failures.length > 0) {
+        lifecycle = 'cleanup-required'
         throw new AggregateError(failures, 'Failed to dispose the empv playback host completely.')
       }
+      lifecycle = 'disposed'
     }
   }
 

@@ -116,10 +116,19 @@ pub fn set_presenter_suspended(presenter_id: String, suspended: bool) -> Result<
 }
 
 pub fn destroy_presenter(presenter_id: String) -> Result<()> {
-    let Some(presenter) = registry::remove_presenter(&presenter_id).map_err(error)? else {
+    let Some(destruction) = registry::begin_presenter_destruction(&presenter_id).map_err(error)?
+    else {
         return Ok(());
     };
-    presenter.host.close().map_err(error)
+    match destruction.presenter().host.close() {
+        Ok(()) => destruction.commit().map_err(error),
+        Err(reason) => match destruction.record_failure() {
+            Ok(()) => Err(error(reason)),
+            Err(registry_reason) => Err(error(format!(
+                "{reason} Failed to retain retryable presenter cleanup ownership: {registry_reason}"
+            ))),
+        },
+    }
 }
 
 pub fn set_window_backdrop(_window_handle: Buffer, _color: Option<String>) -> Result<()> {
