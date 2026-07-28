@@ -8,14 +8,17 @@ const {
   hasRequiredMacosAudioOutputBackend,
   hasRequiredMacosAudioRuntimePolicy,
   patchAddonForBundledRuntime,
+  validateMacosPresenterAddon,
   validateNoForbiddenRuntimeLinks
 } = require('./packaging/embedded-mpv-packaging.cjs')
 
 const packageRoot = path.resolve(__dirname, '..')
 const workspaceRoot = path.resolve(packageRoot, '..', '..')
 const addonRoot = path.join(packageRoot, 'native')
+const presenterAddonRoot = path.join(addonRoot, 'presenter')
 const outputDir = path.join(addonRoot, 'build', 'Release')
 const outputFile = path.join(outputDir, 'empv.node')
+const presenterOutputFile = path.join(outputDir, 'empv_presenter.node')
 const outputLibDir = path.join(outputDir, 'lib')
 const distNativeDir = path.join(packageRoot, 'dist', 'native')
 const unavailableMarkerFile = path.join(outputDir, 'embedded-mpv-unavailable.txt')
@@ -54,6 +57,7 @@ function cleanWindowsOutputRuntimeDlls() {
 
 function cleanOutput() {
   fs.rmSync(outputFile, { force: true })
+  fs.rmSync(presenterOutputFile, { force: true })
   if (fs.existsSync(outputDir)) {
     for (const entry of fs.readdirSync(outputDir)) {
       if (/^empv\..+\.node$/.test(entry)) {
@@ -306,7 +310,7 @@ function resolveRustTarget() {
   return rustTarget
 }
 
-function runNapiBuild(env) {
+function runNapiBuild(env, build) {
   const napiCliBin = resolveNapiCliBin()
   const rustTarget = resolveRustTarget()
   const result = spawnSync(
@@ -318,11 +322,11 @@ function runNapiBuild(env) {
       '--target',
       rustTarget,
       '--cwd',
-      addonRoot,
+      build.root,
       '--manifest-path',
-      path.join(addonRoot, 'Cargo.toml'),
+      build.manifestPath,
       '--package-json-path',
-      path.join(packageRoot, 'package.json'),
+      build.packageJsonPath,
       '--output-dir',
       outputDir
     ],
@@ -345,6 +349,17 @@ function runNapiBuild(env) {
       `napi build produced forbidden platform-suffixed output: ${suffixedOutputs.join(', ')}.`
     )
   }
+}
+
+function recordNativeRolesInManifest() {
+  const manifestPath = path.join(outputDir, 'runtime-manifest.json')
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  manifest.files = {
+    ...manifest.files,
+    addon: 'empv.node',
+    ...(targetPlatform === 'darwin' ? { presenterAddon: 'empv_presenter.node' } : {})
+  }
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }
 
 function main() {
@@ -421,13 +436,31 @@ function main() {
   log(
     `Building Rust native addon using ${runtime.origin} runtime for ${targetPlatform}-${targetArch}...`
   )
-  runNapiBuild(env)
+  runNapiBuild(env, {
+    root: addonRoot,
+    manifestPath: path.join(addonRoot, 'Cargo.toml'),
+    packageJsonPath: path.join(packageRoot, 'package.json')
+  })
 
   if (!fs.existsSync(outputFile)) {
     throw new Error(`Build finished without producing ${outputFile}.`)
   }
 
   if (targetPlatform === 'darwin') {
+    log('Building the libmpv-free macOS presenter addon...')
+    runNapiBuild(env, {
+      root: presenterAddonRoot,
+      manifestPath: path.join(presenterAddonRoot, 'Cargo.toml'),
+      packageJsonPath: path.join(presenterAddonRoot, 'package.json')
+    })
+    if (!fs.existsSync(presenterOutputFile)) {
+      throw new Error(`Build finished without producing ${presenterOutputFile}.`)
+    }
+    const presenterIsolationErrors = validateMacosPresenterAddon(presenterOutputFile)
+    if (presenterIsolationErrors.length > 0) {
+      throw new Error(presenterIsolationErrors.join('\n'))
+    }
+
     if (!hasRequiredMacosAudioOutputBackend(outputFile)) {
       throw new Error(
         `Built native addon is missing the required AVFoundation audio backend policy: ${outputFile}`
@@ -444,6 +477,7 @@ function main() {
     }
   }
 
+  recordNativeRolesInManifest()
   log(`Built ${path.relative(workspaceRoot, outputFile)}.`)
   fs.rmSync(distNativeDir, { recursive: true, force: true })
   fs.mkdirSync(distNativeDir, { recursive: true })

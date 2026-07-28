@@ -116,7 +116,11 @@ function main() {
     log('installed both tarballs into a project outside this repository')
 
     const probe = `
-      import { resolveLibMpvRuntime, loadEmbeddedLibMpvAddon } from 'empv'
+      import {
+        resolveLibMpvRuntime,
+        loadEmbeddedLibMpvAddon,
+        loadEmbeddedLibMpvPresenterAddon
+      } from 'empv'
       const runtime = await resolveLibMpvRuntime()
       if (!runtime.available) {
         throw new Error('The installed prebuilt did not resolve: missing ' + runtime.missing.join(', '))
@@ -125,10 +129,26 @@ function main() {
         throw new Error('Resolved ' + runtime.runtimeDirectory + ', not the installed prebuilt.')
       }
       const loaded = await loadEmbeddedLibMpvAddon()
+      if ('createPresenter' in loaded.addon || 'startPresenterLink' in loaded.addon) {
+        throw new Error('The runtime addon still exports the main-process presenter API.')
+      }
+      let presenterKind = 'not-required'
+      if (process.platform === 'darwin') {
+        const presenter = await loadEmbeddedLibMpvPresenterAddon()
+        if ('createSession' in presenter.addon || 'configureFrameLink' in presenter.addon) {
+          throw new Error('The presenter addon still exports the libmpv runtime API.')
+        }
+        presenterKind = presenter.addon.getPresenterKind()
+      }
       const sessionId = await loaded.addon.createSession({ volume: 1 }, () => {}, () => {})
       const status = loaded.addon.getSessionSnapshot(sessionId)?.status
       await loaded.addon.disposeSession(sessionId)
-      console.log('kind=' + loaded.presentationKind + ' session=' + sessionId + ' status=' + status)
+      console.log(
+        'kind=' + loaded.presentationKind +
+        ' presenter=' + presenterKind +
+        ' session=' + sessionId +
+        ' status=' + status
+      )
     `
     const output = run(process.execPath, ['--input-type=module', '-e', probe], { cwd: project })
     log(output.trim())

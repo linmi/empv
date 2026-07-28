@@ -14,11 +14,15 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { normalizeEmbeddedAddon } from '../../src/embedded.ts'
+import { normalizeEmbeddedAddon, normalizeEmbeddedPresenterAddon } from '../../src/embedded.ts'
 
 const require = createRequire(import.meta.url)
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const ADDON_PATH = path.resolve(scriptDir, '../../native/build/Release/empv.node')
+const PRESENTER_ADDON_PATH = path.resolve(
+  scriptDir,
+  '../../native/build/Release/empv_presenter.node'
+)
 
 const PLAYBACK_BUDGET_MS = 20_000
 const EOF_BUDGET_MS = 20_000
@@ -207,15 +211,18 @@ async function main() {
   log(`fixture: ${fixture}`)
   log(`queue:   ${playlistCopies.join(', ')}`)
   log(`addon:   ${ADDON_PATH}`)
+  log(`presenter:${PRESENTER_ADDON_PATH}`)
 
   let normalized
+  let presenterAddon
   try {
     normalized = normalizeEmbeddedAddon(require(ADDON_PATH))
+    presenterAddon = normalizeEmbeddedPresenterAddon(require(PRESENTER_ADDON_PATH))
   } catch (error) {
     preparedQueue.cleanup()
     preparedFixture.cleanup()
     fail(
-      `Failed to load or normalize the embedded mpv addon from ${ADDON_PATH}: ` +
+      `Failed to load or normalize the embedded mpv runtime/presenter addons: ` +
         `${errorText(error)}`
     )
   }
@@ -230,7 +237,7 @@ async function main() {
   log("addon normalized; getPresentationKind() === 'layer' OK")
 
   const frameLinkService = `com.empv.macos-smoke.${process.pid}.${Date.now()}`
-  addon.startPresenterLink(frameLinkService)
+  presenterAddon.startPresenterLink(frameLinkService)
   addon.configureFrameLink(frameLinkService)
   log(`frame link configured: ${frameLinkService}`)
 
@@ -517,7 +524,7 @@ async function main() {
       await addon.disposeSession(sessionId)
       log('disposeSession resolved OK')
     }
-    addon.stopPresenterLink()
+    presenterAddon.stopPresenterLink()
     preparedQueue.cleanup()
     preparedFixture.cleanup()
   }

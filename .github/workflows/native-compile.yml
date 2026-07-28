@@ -6,8 +6,9 @@ name: native compile gate
 #   需要在目标平台真实编译、链接，并由 Linux smoke 驱动完整播放契约。
 #
 # 门禁边界（job 矩阵）：
-#   * macos：'layer' 后端的编译 + 运行时。单 job 完成编译与 smoke（IOSurface 池、
-#     mach 帧链、真实播放、RGBA 回读），因为两者用的是同一份 Homebrew libmpv。
+#   * macos：隔离的 runtime addon 与 libmpv-free presenter addon，以及 'layer'
+#     后端运行时。单 job 完成编译、链接隔离断言与 smoke（IOSurface 池、mach 帧链、
+#     真实播放、RGBA 回读），因为 runtime 侧使用同一份 Homebrew libmpv。
 #   * linux / windows：覆盖「编译 + 链接」——cargo/napi 必须以 0 退出且真的产出
 #     build/Release/empv.node（每个 job 都断言产物存在）。
 #   * windows：编译后把同一份 pinned compile/smoke DLL 放到 addon 旁，真实加载
@@ -316,7 +317,7 @@ jobs:
       # loss, generation restart/id reuse, source replacement and final cleanup.
       # Pixel composition remains the interactive hardware gate's responsibility.
       - name: Run crash-isolated Electron playback smoke
-        timeout-minutes: 3
+        timeout-minutes: 1
         run: pnpm run smoke:electron-playback
 
   # ───────────────────────────────────────────────────────────────────────────
@@ -405,16 +406,33 @@ jobs:
             --manifest-path "${GITHUB_WORKSPACE}/native/Cargo.toml" \
             --package-json-path "${GITHUB_WORKSPACE}/package.json" \
             --output-dir "${GITHUB_WORKSPACE}/native/build/Release"
+          pnpm exec napi build \
+            --release \
+            --target aarch64-apple-darwin \
+            --cwd "${GITHUB_WORKSPACE}/native/presenter" \
+            --manifest-path "${GITHUB_WORKSPACE}/native/presenter/Cargo.toml" \
+            --package-json-path "${GITHUB_WORKSPACE}/native/presenter/package.json" \
+            --output-dir "${GITHUB_WORKSPACE}/native/build/Release"
 
-      - name: Assert empv.node was produced
+      - name: Assert the isolated runtime and libmpv-free presenter addons were produced
         run: |
           node_file="${GITHUB_WORKSPACE}/native/build/Release/empv.node"
+          presenter_file="${GITHUB_WORKSPACE}/native/build/Release/empv_presenter.node"
           test -f "$node_file" || { echo "missing $node_file"; exit 1; }
+          test -f "$presenter_file" || { echo "missing $presenter_file"; exit 1; }
           if compgen -G "${GITHUB_WORKSPACE}/native/build/Release/empv.*.node" > /dev/null; then
             echo "platform-suffixed empv artifact is forbidden"
             exit 1
           fi
+          if otool -L "$presenter_file" | tail -n +3 | grep -Eiq 'libmpv|@loader_path|@rpath'; then
+            echo "empv_presenter.node must not load libmpv or bundled third-party libraries"
+            otool -L "$presenter_file"
+            exit 1
+          fi
           echo "produced $node_file"
+          echo "produced libmpv-free $presenter_file"
+          echo "EMPV_SMOKE_ADDON_PATH=${node_file}" >> "$GITHUB_ENV"
+          echo "EMPV_SMOKE_PRESENTER_ADDON_PATH=${presenter_file}" >> "$GITHUB_ENV"
 
       # macOS 的预编译包要捆绑 runtime，而这个 job 只有 Homebrew 的 libmpv：addon
       # 链的是绝对路径，没有 @loader_path 闭包可走，打出来的包形状与真实发布件不同。

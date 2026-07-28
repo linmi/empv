@@ -5,8 +5,9 @@
 #
 # What each platform contributes, and why they are not symmetrical:
 #
-#   darwin-arm64, darwin-x64  the addon plus a libmpv runtime built here from
-#                             pinned sources with -Dgpl=false. macOS has no
+#   darwin-arm64, darwin-x64  the isolated runtime addon, a libmpv-free
+#                             presenter bridge, and a libmpv runtime built here
+#                             from pinned sources with -Dgpl=false. macOS has no
 #                             system libmpv, so the package has to carry one,
 #                             and it has to be the LGPL build.
 #   win32-x64                 the addon plus a libmpv cross-compiled here with
@@ -145,9 +146,10 @@ jobs:
           if-no-files-found: error
 
   # ───────────────────────────────────────────────────────────────────────────
-  # macOS: build the LGPL runtime from pinned sources, link the addon against
-  # it, then prove the resulting tarball works by installing it into an empty
-  # project outside the checkout and opening a real mpv session there.
+  # macOS: build the LGPL runtime from pinned sources, link only the runtime
+  # addon against it, build the system-only presenter bridge, then prove the
+  # resulting tarball works by installing it into an empty project outside the
+  # checkout and opening both addons plus a real mpv session there.
   # ───────────────────────────────────────────────────────────────────────────
   macos:
     name: macos-${{ matrix.arch }}
@@ -251,6 +253,14 @@ jobs:
           # The label says arm64/x64; ask the binary itself.
           file dist/native/empv.node
           lipo -archs dist/native/empv.node
+          file dist/native/empv_presenter.node
+          lipo -archs dist/native/empv_presenter.node
+          if otool -L dist/native/empv_presenter.node | tail -n +3 \
+            | grep -Eiq 'libmpv|@loader_path|@rpath'; then
+            echo "empv_presenter.node must contain only the main-process presenter bridge."
+            otool -L dist/native/empv_presenter.node
+            exit 1
+          fi
           echo "origin=${origin} arch=${arch}"
 
       # Packs the platform package, installs it and the main package into an
@@ -590,6 +600,10 @@ jobs:
           Those libraries are LGPL-2.1-or-later; \`THIRD-PARTY-NOTICES.md\` lists
           their versions and sources and \`runtime-manifest.json\` records the
           exact build inputs. Nothing needs installing alongside them.
+
+          macOS packages additionally carry \`empv_presenter.node\`, a separate
+          AppKit/CALayer bridge that links only Apple system frameworks. Electron
+          main loads this bridge, never the libmpv-linked runtime addon.
 
           On Windows that libmpv had to be built rather than fetched: every
           prebuilt Windows libmpv is GPL. It is cross-compiled with MinGW-w64

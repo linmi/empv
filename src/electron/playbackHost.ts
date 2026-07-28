@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto'
 
 import {
-  loadEmbeddedLibMpvAddon,
+  loadEmbeddedLibMpvPresenterAddon,
   type LibMpvRenderSize,
   type LibMpvVideoLayerAttachOptions,
   type LibMpvVideoLayerBounds,
   type LibMpvWindowAttachOptions,
-  type LoadedEmbeddedLibMpvAddon
+  type LoadedEmbeddedLibMpvPresenterAddon
 } from '../embedded.ts'
 
 import type { EmpvRuntimeClient } from './client.ts'
@@ -40,7 +40,7 @@ export type EmpvPlaybackHostOptions = {
   // Layer-only impure boundary, injectable for tests. Window presentation never
   // calls it: loading empv.node/libmpv in Electron main would defeat crash
   // isolation even if every session stayed in the runtime process.
-  loadAddon?: () => Promise<LoadedEmbeddedLibMpvAddon>
+  loadPresenterAddon?: () => Promise<LoadedEmbeddedLibMpvPresenterAddon>
 }
 
 type EmpvLayerHostCore = {
@@ -342,18 +342,8 @@ export async function createEmpvPlaybackHost(
     return createWindowPlaybackHost(client, frameLinkServiceName)
   }
 
-  const loadAddon = options.loadAddon ?? loadEmbeddedLibMpvAddon
-  const loaded = await loadAddon()
-  if (loaded.presentationKind !== probe.presentationKind) {
-    throw new Error(
-      `The empv runtime reports ${probe.presentationKind} presentation, but the Electron main addon reports ${loaded.presentationKind}; refusing to join mismatched native backends.`
-    )
-  }
-  if (loaded.presentationKind !== 'layer') {
-    throw new Error(
-      `The empv window backend must remain isolated in the runtime process; refusing to load it in Electron main.`
-    )
-  }
+  const loadPresenterAddon = options.loadPresenterAddon ?? loadEmbeddedLibMpvPresenterAddon
+  const loaded = await loadPresenterAddon()
   const { addon } = loaded
 
   // The mach frame-link receiver only exists on 'layer'. 'window'

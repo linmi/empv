@@ -35,12 +35,16 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { normalizeEmbeddedAddon } from '../../src/embedded.ts'
+import { normalizeEmbeddedAddon, normalizeEmbeddedPresenterAddon } from '../../src/embedded.ts'
 
 const require = createRequire(import.meta.url)
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const ADDON_PATH = path.resolve(scriptDir, '../../native/build/Release/empv.node')
+const PRESENTER_ADDON_PATH = path.resolve(
+  scriptDir,
+  '../../native/build/Release/empv_presenter.node'
+)
 
 // Long enough for the decoder to reach steady state and for dropped frames to
 // accumulate if they are going to; short enough to run in CI.
@@ -405,6 +409,9 @@ async function main() {
   if (!existsSync(ADDON_PATH)) {
     fail(`No addon at ${ADDON_PATH}. Run "pnpm run build:native" first.`)
   }
+  if (!existsSync(PRESENTER_ADDON_PATH)) {
+    fail(`No presenter addon at ${PRESENTER_ADDON_PATH}. Run "pnpm run build:native" first.`)
+  }
 
   // require, not import(): a .node is a CommonJS binding, and this is the same
   // path the smoke takes.
@@ -413,9 +420,10 @@ async function main() {
     fail(`Expected the layer backend on macOS, got ${loaded.presentationKind}.`)
   }
   const addon = loaded.addon
+  const presenterAddon = normalizeEmbeddedPresenterAddon(require(PRESENTER_ADDON_PATH))
 
   const frameLinkService = `com.empv.macos-benchmark.${process.pid}`
-  addon.startPresenterLink(frameLinkService)
+  presenterAddon.startPresenterLink(frameLinkService)
   addon.configureFrameLink(frameLinkService)
 
   const fixtureDir = mkdtempSync(path.join(tmpdir(), 'empv-macos-benchmark-'))
@@ -438,6 +446,7 @@ async function main() {
       )
     }
   } finally {
+    presenterAddon.stopPresenterLink()
     rmSync(fixtureDir, { recursive: true, force: true })
   }
 

@@ -6,8 +6,14 @@
 
 #include <windows.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <exception>
+#include <mutex>
+#include <new>
+#include <string>
+#include <thread>
 
 namespace {
 
@@ -81,71 +87,323 @@ void setWin32Error(const char* fallbackMessage) noexcept
     }
 }
 
+const wchar_t* parkingPropertyName() noexcept
+{
+    return L"EmpvParkingWindow";
+}
+
+constexpr UINT commandMessage = WM_APP + 0x31F;
+constexpr UINT commandTimeoutMs = 5'000;
+
+enum class WindowOperation {
+    hideHost,
+    closeHost,
+    prepareChild,
+    attach,
+    setBounds,
+    show,
+    hide,
+    detach,
+};
+
+struct WindowCommand {
+    WindowOperation operation;
+    HWND parent = nullptr;
+    HWND child = nullptr;
+    int32_t xPixels = 0;
+    int32_t yPixels = 0;
+    int32_t widthPixels = 0;
+    int32_t heightPixels = 0;
+    bool frameChanged = false;
+    bool completed = false;
+    bool succeeded = false;
+    char error[2048] = {};
+};
+
+bool prepareChildOnOwnerThread(HWND child) noexcept
+{
+    SetLastError(ERROR_SUCCESS);
+    const LONG_PTR previousStyle = SetWindowLongPtrW(
+        child,
+        GWL_STYLE,
+        WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
+    );
+    if (previousStyle == 0 && GetLastError() != ERROR_SUCCESS) {
+        setWin32Error("Failed to set embedded MPV child window style.");
+        return false;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    const LONG_PTR previousExtendedStyle = SetWindowLongPtrW(
+        child,
+        GWL_EXSTYLE,
+        WS_EX_NOACTIVATE | WS_EX_TRANSPARENT
+    );
+    if (previousExtendedStyle == 0 && GetLastError() != ERROR_SUCCESS) {
+        setWin32Error(
+            "Failed to set embedded MPV child extended window style."
+        );
+        return false;
+    }
+    return true;
+}
+
+bool attachOnOwnerThread(HWND parent, HWND child) noexcept
+{
+    SetLastError(ERROR_SUCCESS);
+    const HWND previousParent = SetParent(child, parent);
+    if (!previousParent && GetLastError() != ERROR_SUCCESS) {
+        setWin32Error("Failed to adopt embedded MPV child window.");
+        return false;
+    }
+    return true;
+}
+
+bool setBoundsOnOwnerThread(const WindowCommand& command) noexcept
+{
+    UINT flags = SWP_NOACTIVATE;
+    if (command.frameChanged) {
+        flags |= SWP_FRAMECHANGED;
+    }
+    if (!SetWindowPos(
+            command.child,
+            HWND_TOP,
+            command.xPixels,
+            command.yPixels,
+            command.widthPixels,
+            command.heightPixels,
+            flags
+        )) {
+        setWin32Error("Failed to position embedded MPV child window.");
+        return false;
+    }
+    return true;
+}
+
+bool detachOnOwnerThread(HWND child) noexcept
+{
+    const HWND parking =
+        reinterpret_cast<HWND>(GetPropW(child, parkingPropertyName()));
+    if (!parking || !IsWindow(parking)) {
+        setError(
+            "WID presenter child has no valid session-owned parking window."
+        );
+        return false;
+    }
+    ShowWindow(child, SW_HIDE);
+    SetLastError(ERROR_SUCCESS);
+    const HWND previousParent = SetParent(child, parking);
+    if (!previousParent && GetLastError() != ERROR_SUCCESS) {
+        setWin32Error(
+            "Failed to return the embedded MPV child window to its session-owned parking window."
+        );
+        return false;
+    }
+    return true;
+}
+
+void finishCommand(WindowCommand& command, bool succeeded) noexcept
+{
+    command.succeeded = succeeded;
+    if (!succeeded) {
+        std::snprintf(
+            command.error,
+            sizeof(command.error),
+            "%s",
+            lastErrorMessage[0] == '\0'
+                ? "Win32 WID window-thread command failed."
+                : lastErrorMessage
+        );
+    }
+    command.completed = true;
+}
+
+LRESULT executeCommand(HWND, WindowCommand& command) noexcept
+{
+    clearError();
+    switch (command.operation) {
+        case WindowOperation::hideHost:
+            ShowWindow(command.child, SW_HIDE);
+            finishCommand(command, true);
+            break;
+        case WindowOperation::closeHost:
+            if (command.child && IsWindow(command.child)) {
+                RemovePropW(command.child, parkingPropertyName());
+                if (!DestroyWindow(command.child)) {
+                    setWin32Error("Failed to destroy embedded MPV video window.");
+                    finishCommand(command, false);
+                    break;
+                }
+            }
+            finishCommand(command, true);
+            PostQuitMessage(0);
+            break;
+        case WindowOperation::prepareChild:
+            finishCommand(command, prepareChildOnOwnerThread(command.child));
+            break;
+        case WindowOperation::attach:
+            finishCommand(
+                command,
+                attachOnOwnerThread(command.parent, command.child)
+            );
+            break;
+        case WindowOperation::setBounds:
+            finishCommand(command, setBoundsOnOwnerThread(command));
+            break;
+        case WindowOperation::show:
+            ShowWindow(command.child, SW_SHOWNOACTIVATE);
+            finishCommand(command, true);
+            break;
+        case WindowOperation::hide:
+            ShowWindow(command.child, SW_HIDE);
+            finishCommand(command, true);
+            break;
+        case WindowOperation::detach:
+            finishCommand(command, detachOnOwnerThread(command.child));
+            break;
+    }
+    return command.succeeded ? 1 : 0;
+}
+
+bool dispatchCommand(
+    HWND target,
+    WindowCommand& command,
+    const char* timeoutMessage) noexcept
+{
+    if (!target || !IsWindow(target)) {
+        setError("WID window-thread command target is not a valid Win32 window.");
+        return false;
+    }
+    auto* dispatched = new (std::nothrow) WindowCommand(command);
+    if (!dispatched) {
+        setError("Failed to allocate a Win32 WID window-thread command.");
+        return false;
+    }
+    SetLastError(ERROR_SUCCESS);
+    DWORD_PTR ignored = 0;
+    const LRESULT sent = SendMessageTimeoutW(
+        target,
+        commandMessage,
+        0,
+        reinterpret_cast<LPARAM>(dispatched),
+        SMTO_ABORTIFHUNG | SMTO_BLOCK,
+        commandTimeoutMs,
+        &ignored
+    );
+    if (sent == 0) {
+        // SendMessageTimeout may return while a target that started processing
+        // the message still owns lParam. Leak this one command deliberately:
+        // the caller treats the timeout as a generation failure and exits the
+        // utility process, while freeing here would create a cross-thread UAF.
+        const DWORD error = GetLastError();
+        if (error == ERROR_TIMEOUT || error == ERROR_SUCCESS) {
+            setError(timeoutMessage);
+        } else {
+            setWin32Error(timeoutMessage);
+        }
+        return false;
+    }
+    command = *dispatched;
+    delete dispatched;
+    if (!command.completed) {
+        setError("Win32 WID window-thread command returned without a result.");
+        return false;
+    }
+    if (!command.succeeded) {
+        setError(command.error);
+        return false;
+    }
+    return true;
+}
+
 class PlatformHost {
 public:
     bool open() noexcept
     {
-        if (window_) {
+        if (windowThread_.joinable() || window_.load() != 0) {
             setError("WID host window is already open.");
             return false;
         }
-        if (!registerWindowClass()) {
+
+        {
+            std::lock_guard<std::mutex> lock(startupMutex_);
+            startupFinished_ = false;
+            startupSucceeded_ = false;
+            startupError_.clear();
+        }
+        try {
+            windowThread_ = std::thread([this]() { runWindowThread(); });
+        } catch (const std::exception& error) {
+            std::snprintf(
+                lastErrorMessage,
+                sizeof(lastErrorMessage),
+                "Failed to start the Win32 WID window thread: %s",
+                error.what()
+            );
             return false;
         }
 
-        window_ = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-            windowClassName(),
-            L"empv video",
-            WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-            0,
-            0,
-            1,
-            1,
-            nullptr,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr
-        );
-        if (!window_) {
-            setWin32Error("Failed to create embedded MPV video window.");
-            return false;
+        std::unique_lock<std::mutex> lock(startupMutex_);
+        startupCondition_.wait(lock, [this]() { return startupFinished_; });
+        const bool succeeded = startupSucceeded_;
+        const std::string error = startupError_;
+        lock.unlock();
+        if (!succeeded) {
+            if (windowThread_.joinable()) {
+                windowThread_.join();
+            }
+            setError(error.c_str());
         }
-        ownerThread_ = GetCurrentThreadId();
-        return true;
+        return succeeded;
     }
 
     uintptr_t nativeHandle() const noexcept
     {
-        return reinterpret_cast<uintptr_t>(window_);
+        return window_.load(std::memory_order_acquire);
     }
 
     bool hide() noexcept
     {
-        if (!window_) {
+        const HWND child = windowHandle();
+        if (!child) {
             return true;
         }
-        if (!isOwnerThread("hide")) {
-            return false;
-        }
-        ShowWindow(window_, SW_HIDE);
-        return true;
+        WindowCommand command{
+            .operation = WindowOperation::hideHost,
+            .child = child,
+        };
+        return dispatchCommand(
+            child,
+            command,
+            "Timed out hiding the embedded MPV video window on its owner thread."
+        );
     }
 
     bool destroy() noexcept
     {
-        if (!window_) {
+        if (!windowThread_.joinable()) {
             return true;
         }
-        if (!isOwnerThread("destroy")) {
+        const HWND parking = parkingWindowHandle();
+        const HWND child = windowHandle();
+        if (!parking) {
+            setError(
+                "WID host window thread is active without its parking window."
+            );
             return false;
         }
-        if (!DestroyWindow(window_)) {
-            setWin32Error("Failed to destroy embedded MPV video window.");
+        WindowCommand command{
+            .operation = WindowOperation::closeHost,
+            .child = child,
+        };
+        if (!dispatchCommand(
+                parking,
+                command,
+                "Timed out destroying the embedded MPV video window on its owner thread."
+            )) {
             return false;
         }
-        window_ = nullptr;
-        ownerThread_ = 0;
+        windowThread_.join();
         return true;
     }
 
@@ -178,12 +436,120 @@ private:
         return true;
     }
 
+    void finishStartup(bool succeeded) noexcept
+    {
+        std::lock_guard<std::mutex> lock(startupMutex_);
+        startupSucceeded_ = succeeded;
+        startupFinished_ = true;
+        if (!succeeded) {
+            startupError_ =
+                lastErrorMessage[0] == '\0'
+                    ? "Failed to start the Win32 WID window thread."
+                    : lastErrorMessage;
+        }
+        startupCondition_.notify_one();
+    }
+
+    void runWindowThread() noexcept
+    {
+        if (!registerWindowClass()) {
+            finishStartup(false);
+            return;
+        }
+
+        HWND parking = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            windowClassName(),
+            L"empv video parking",
+            WS_POPUP | WS_CLIPCHILDREN,
+            0,
+            0,
+            1,
+            1,
+            nullptr,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            nullptr
+        );
+        if (!parking) {
+            setWin32Error("Failed to create embedded MPV parking window.");
+            finishStartup(false);
+            return;
+        }
+
+        HWND child = CreateWindowExW(
+            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            windowClassName(),
+            L"empv video",
+            WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+            0,
+            0,
+            1,
+            1,
+            parking,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            nullptr
+        );
+        if (!child) {
+            setWin32Error("Failed to create embedded MPV video window.");
+            DestroyWindow(parking);
+            finishStartup(false);
+            return;
+        }
+        if (!SetPropW(
+                child,
+                parkingPropertyName(),
+                reinterpret_cast<HANDLE>(parking)
+            )) {
+            setWin32Error(
+                "Failed to associate the embedded MPV video window with its parking window."
+            );
+            DestroyWindow(child);
+            DestroyWindow(parking);
+            finishStartup(false);
+            return;
+        }
+        parkingWindow_.store(
+            reinterpret_cast<uintptr_t>(parking),
+            std::memory_order_release
+        );
+        window_.store(
+            reinterpret_cast<uintptr_t>(child),
+            std::memory_order_release
+        );
+        finishStartup(true);
+
+        MSG message{};
+        while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        if (IsWindow(child)) {
+            RemovePropW(child, parkingPropertyName());
+            DestroyWindow(child);
+        }
+        if (IsWindow(parking)) {
+            DestroyWindow(parking);
+        }
+        window_.store(0, std::memory_order_release);
+        parkingWindow_.store(0, std::memory_order_release);
+    }
+
     static LRESULT CALLBACK windowProc(
         HWND window,
         UINT message,
         WPARAM wParam,
         LPARAM lParam) noexcept
     {
+        if (message == commandMessage) {
+            auto* command = reinterpret_cast<WindowCommand*>(lParam);
+            if (!command) {
+                return 0;
+            }
+            return executeCommand(window, *command);
+        }
         if (message == WM_NCHITTEST) {
             return HTTRANSPARENT;
         }
@@ -193,22 +559,28 @@ private:
         return DefWindowProcW(window, message, wParam, lParam);
     }
 
-    bool isOwnerThread(const char* operation) const noexcept
+    HWND windowHandle() const noexcept
     {
-        if (ownerThread_ == GetCurrentThreadId()) {
-            return true;
-        }
-        std::snprintf(
-            lastErrorMessage,
-            sizeof(lastErrorMessage),
-            "Win32 WID host_%s must run on the thread that created the HWND.",
-            operation
+        return reinterpret_cast<HWND>(
+            window_.load(std::memory_order_acquire)
         );
-        return false;
     }
 
-    HWND window_ = nullptr;
-    DWORD ownerThread_ = 0;
+    HWND parkingWindowHandle() const noexcept
+    {
+        return reinterpret_cast<HWND>(
+            parkingWindow_.load(std::memory_order_acquire)
+        );
+    }
+
+    std::thread windowThread_;
+    std::mutex startupMutex_;
+    std::condition_variable startupCondition_;
+    bool startupFinished_ = false;
+    bool startupSucceeded_ = false;
+    std::string startupError_;
+    std::atomic<uintptr_t> parkingWindow_{0};
+    std::atomic<uintptr_t> window_{0};
 };
 
 class PlatformPresenter {
@@ -241,31 +613,15 @@ public:
             setError("WID presenter cannot prepare an invalid Win32 child.");
             return false;
         }
-
-        SetLastError(ERROR_SUCCESS);
-        const LONG_PTR previousStyle = SetWindowLongPtrW(
+        WindowCommand command{
+            .operation = WindowOperation::prepareChild,
+            .child = child,
+        };
+        return dispatchCommand(
             child,
-            GWL_STYLE,
-            WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
+            command,
+            "Timed out preparing the embedded MPV child on its owner thread."
         );
-        if (previousStyle == 0 && GetLastError() != ERROR_SUCCESS) {
-            setWin32Error("Failed to set embedded MPV child window style.");
-            return false;
-        }
-
-        SetLastError(ERROR_SUCCESS);
-        const LONG_PTR previousExtendedStyle = SetWindowLongPtrW(
-            child,
-            GWL_EXSTYLE,
-            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT
-        );
-        if (previousExtendedStyle == 0 && GetLastError() != ERROR_SUCCESS) {
-            setWin32Error(
-                "Failed to set embedded MPV child extended window style."
-            );
-            return false;
-        }
-        return true;
     }
 
     bool attach(
@@ -278,13 +634,16 @@ public:
             setError("WID presenter cannot attach invalid Win32 windows.");
             return false;
         }
-        SetLastError(ERROR_SUCCESS);
-        const HWND previousParent = SetParent(child, parent);
-        if (!previousParent && GetLastError() != ERROR_SUCCESS) {
-            setWin32Error("Failed to adopt embedded MPV child window.");
-            return false;
-        }
-        return true;
+        WindowCommand command{
+            .operation = WindowOperation::attach,
+            .parent = parent,
+            .child = child,
+        };
+        return dispatchCommand(
+            child,
+            command,
+            "Timed out adopting the embedded MPV child on its owner thread."
+        );
     }
 
     bool setBounds(
@@ -304,23 +663,20 @@ public:
             setError("WID presenter pixel width and height must be positive.");
             return false;
         }
-        UINT flags = SWP_NOACTIVATE;
-        if (frameChanged) {
-            flags |= SWP_FRAMECHANGED;
-        }
-        if (!SetWindowPos(
-                child,
-                HWND_TOP,
-                xPixels,
-                yPixels,
-                widthPixels,
-                heightPixels,
-                flags
-            )) {
-            setWin32Error("Failed to position embedded MPV child window.");
-            return false;
-        }
-        return true;
+        WindowCommand command{
+            .operation = WindowOperation::setBounds,
+            .child = child,
+            .xPixels = xPixels,
+            .yPixels = yPixels,
+            .widthPixels = widthPixels,
+            .heightPixels = heightPixels,
+            .frameChanged = frameChanged,
+        };
+        return dispatchCommand(
+            child,
+            command,
+            "Timed out positioning the embedded MPV child on its owner thread."
+        );
     }
 
     bool setVisible(uintptr_t childHandle, bool visible) const noexcept
@@ -330,8 +686,17 @@ public:
             setError("WID presenter child is not a valid Win32 window.");
             return false;
         }
-        ShowWindow(child, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
-        return true;
+        WindowCommand command{
+            .operation = visible
+                ? WindowOperation::show
+                : WindowOperation::hide,
+            .child = child,
+        };
+        return dispatchCommand(
+            child,
+            command,
+            "Timed out changing embedded MPV child visibility on its owner thread."
+        );
     }
 
     bool detach(uintptr_t childHandle) const noexcept
@@ -341,14 +706,15 @@ public:
             setError("WID presenter child is not a valid Win32 window.");
             return false;
         }
-        ShowWindow(child, SW_HIDE);
-        SetLastError(ERROR_SUCCESS);
-        const HWND previousParent = SetParent(child, nullptr);
-        if (!previousParent && GetLastError() != ERROR_SUCCESS) {
-            setWin32Error("Failed to release embedded MPV child window.");
-            return false;
-        }
-        return true;
+        WindowCommand command{
+            .operation = WindowOperation::detach,
+            .child = child,
+        };
+        return dispatchCommand(
+            child,
+            command,
+            "Timed out detaching the embedded MPV child on its owner thread."
+        );
     }
 
 private:

@@ -22,7 +22,7 @@ selected at load time by `getPresentationKind()`:
 | ----------- | ----------------------------------------------------------------------- | --------------------------------------- |
 | kind        | `layer`                                                                 | `window`                                |
 | video out   | `vo=libmpv`, rendered by a Rust worker into a three-slot IOSurface pool | `vo=gpu` into an app-owned child window |
-| transport   | mach frame link → main-process `CALayer` presenter                      | main process reparents the child window |
+| transport   | mach frame link → main-process `CALayer` presenter                      | isolated presenter reparents the child window |
 | compositing | under **or** over the web contents (`zOrder`)                           | above the web contents                  |
 
 Playback surface, all through the same session id: load/seek/replay, pause,
@@ -58,15 +58,16 @@ dependency can only be resolved from a registry, the platform package is named
 alongside the main one:
 
 ```bash
-# macOS, Apple Silicon — addon and libmpv runtime, nothing to build
+# macOS, Apple Silicon — runtime addon, presenter bridge, and libmpv; nothing to build
 npm install \
   https://github.com/linmi/empv/releases/download/v0.3.1/empv-0.3.1.tgz \
   https://github.com/linmi/empv/releases/download/v0.3.1/empv-darwin-arm64-0.3.1.tgz
 ```
 
 `empv-darwin-x64` and `empv-win32-x64` are attached to the same release. No Rust
-toolchain is involved either way: the addon is prebuilt, and on macOS so is the
-runtime it loads. Once empv is published, `npm install empv` will pull the right
+toolchain is involved either way: both addons are prebuilt, and on macOS so is
+the runtime loaded only by the playback addon. Once empv is published,
+`npm install empv` will pull the right
 platform package on its own.
 
 The Windows package carries its libmpv too. Every _prebuilt_ Windows libmpv is
@@ -105,18 +106,23 @@ for bundled resources under common app roots:
 resources/libmpv/darwin-arm64/
   runtime-manifest.json
   addon/empv.node
+  addon/empv_presenter.node
   lib/libmpv.dylib
   include/mpv/client.h
 ```
 
-Windows and Linux use the same shape, with platform library names such as
-`libmpv-2.dll` or `libmpv.so.2`.
+`empv_presenter.node` is macOS-only. It contains the AppKit/CALayer presenter
+bridge and must link only Apple system frameworks; it contains no session API
+and no libmpv dependency. Windows and Linux use the same runtime shape without
+that second addon, with platform library names such as `libmpv-2.dll` or
+`libmpv.so.2`.
 
 Development overrides:
 
 ```text
 EMPV_RUNTIME_DIR=/absolute/path/to/runtime
 EMPV_ADDON_PATH=/absolute/path/to/empv.node
+EMPV_PRESENTER_ADDON_PATH=/absolute/path/to/empv_presenter.node
 EMPV_LIBRARY_PATH=/absolute/path/to/libmpv.dylib
 ```
 
@@ -175,15 +181,20 @@ tracks do not compete with them.
 Loading the addon straight into your main process means a native mpv crash takes
 the whole app down. `empv/electron` runs sessions in a separate **playback
 process**, so a crash costs you that runtime generation and nothing else. The
-Windows/Linux child-window presenter lives in that same process: Electron main
-never loads `empv.node`/libmpv or performs synchronous native operations against
-a utility-owned child window. The macOS CALayer presenter remains in main
-because AppKit must attach to Electron's `NSView`; decoded/rendered IOSurfaces
-still originate in the isolated runtime. macOS and Windows use an Electron
+Windows/Linux child-window presenter lives in that same process. On macOS,
+AppKit must attach the CALayer presenter to Electron's `NSView`, so main loads
+the separate `empv_presenter.node` bridge; packaging rejects that bridge if it
+links libmpv or any non-system dependency. Electron main therefore never loads
+`empv.node` or libmpv on any platform. Decoded/rendered IOSurfaces still
+originate in the isolated runtime. macOS and Windows use an Electron
 utility process. Linux uses a separately packaged plain Node executable: Chromium
 utility processes and Electron's `ELECTRON_RUN_AS_NODE` mode both preload
 Chromium's FFmpeg build, whose global symbols are not ABI-compatible with a
 distribution's libmpv dependency chain.
+
+On Windows, each native video window has a dedicated Win32 message thread
+inside the playback process. Presenter mutations are bounded commands to that
+thread; Electron utility IPC never doubles as the child window's message pump.
 
 Your runtime entry is two lines — your bundler still decides where it lands:
 
@@ -383,7 +394,10 @@ Know these before adopting:
 Windows and Linux use mpv `wid` with an app-owned child window. macOS uses
 `vo=libmpv`: a Rust render worker renders into a three-slot IOSurface pool, a
 mach frame link transfers the pool to the main process, and a CALayer presenter
-displays the latest valid frame. The Objective-C++ files under
+displays the latest valid frame. The runtime worker loads `empv.node`; Electron
+main loads only the separately built `empv_presenter.node`, whose release and
+prebuilt gates require a system-framework-only Mach-O dependency graph. The
+Objective-C++ files under
 `native/shims/macos/` are framework/C-ABI adapters only; playback, rendering,
 generation, retry, and presenter decisions live in Rust.
 

@@ -1,6 +1,7 @@
 import type {
   LibMpvCapturedFrame,
-  LibMpvLayerAddon,
+  LibMpvLayerPresenterAddon,
+  LibMpvLayerRuntimeAddon,
   LibMpvPlayback,
   LibMpvRenderSize,
   LibMpvSessionOptions,
@@ -8,7 +9,8 @@ import type {
   LibMpvVideoLayerAttachOptions,
   LibMpvVideoLayerBounds,
   LibMpvWindowAddon,
-  LoadedEmbeddedLibMpvAddon
+  LoadedEmbeddedLibMpvAddon,
+  LoadedEmbeddedLibMpvPresenterAddon
 } from '../../src/embedded.ts'
 import type { LibMpvRuntime } from '../../src/runtime.ts'
 
@@ -62,6 +64,7 @@ const FAKE_RUNTIME: LibMpvRuntime = {
   missing: [],
   platform: 'darwin',
   platformKey: 'darwin-arm64',
+  presenterAddonPath: '/fake/empv_presenter.node',
   runtimeDirectory: '/fake'
 }
 
@@ -144,7 +147,18 @@ function makeCore(calls: AddonCall[], overrides: FakeAddonOverrides) {
     setVideoZoom: note('setVideoZoom'),
     setVolume: note('setVolume'),
     startRecording: note('startRecording'),
-    stopRecording: note('stopRecording'),
+    stopRecording: note('stopRecording')
+  }
+}
+
+function makePresenterSurface(calls: AddonCall[], overrides: FakeAddonOverrides) {
+  const note =
+    (method: string) =>
+    (...args: unknown[]): void => {
+      calls.push({ method, args })
+    }
+
+  return {
     createPresenter: (
       presenterId: string,
       windowHandle: Buffer,
@@ -181,10 +195,29 @@ export function makeLayerAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'l
       calls.push({ method, args })
     }
 
-  const addon: LibMpvLayerAddon = {
+  const addon: LibMpvLayerRuntimeAddon = {
     ...makeCore(calls, overrides),
     getPresentationKind: () => 'layer',
-    configureFrameLink: note('configureFrameLink'),
+    configureFrameLink: note('configureFrameLink')
+  }
+
+  return { calls, loaded: { presentationKind: 'layer', addon, runtime: FAKE_RUNTIME } }
+}
+
+export function makeLayerPresenterAddon(overrides: FakeAddonOverrides = {}): {
+  calls: AddonCall[]
+  loaded: LoadedEmbeddedLibMpvPresenterAddon
+} {
+  const calls: AddonCall[] = []
+  const note =
+    (method: string) =>
+    (...args: unknown[]): void => {
+      calls.push({ method, args })
+    }
+
+  const addon: LibMpvLayerPresenterAddon = {
+    ...makePresenterSurface(calls, overrides),
+    getPresenterKind: () => 'layer',
     startPresenterLink: note('startPresenterLink'),
     stopPresenterLink: note('stopPresenterLink'),
     presentSurface: (...args: unknown[]): void => {
@@ -195,7 +228,7 @@ export function makeLayerAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'l
     unobserveWindowOcclusion: note('unobserveWindowOcclusion')
   }
 
-  return { calls, loaded: { presentationKind: 'layer', addon, runtime: FAKE_RUNTIME } }
+  return { calls, loaded: { addon, runtime: FAKE_RUNTIME } }
 }
 
 export function makeWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'window'> {
@@ -203,6 +236,7 @@ export function makeWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'
 
   const addon: LibMpvWindowAddon = {
     ...makeCore(calls, overrides),
+    ...makePresenterSurface(calls, overrides),
     getPresentationKind: () => 'window',
     getVideoWindowHandle: (sessionId: string): number | null => {
       calls.push({ method: 'getVideoWindowHandle', args: [sessionId] })

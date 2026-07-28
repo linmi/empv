@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { normalizeEmbeddedAddon } from '../src/embedded.ts'
+import { normalizeEmbeddedAddon, normalizeEmbeddedPresenterAddon } from '../src/embedded.ts'
 
 // The contract a backend must satisfy, written out here rather than imported
 // from the implementation: these are the functions a consumer is promised, so a
@@ -42,17 +42,19 @@ const CORE_FUNCTION_NAMES = [
   'setSpeed',
   'setVolume',
   'startRecording',
-  'stopRecording',
+  'stopRecording'
+]
+
+const LAYER_RUNTIME_FUNCTION_NAMES = ['configureFrameLink']
+
+const LAYER_PRESENTER_FUNCTION_NAMES = [
+  'getPresenterKind',
   'createPresenter',
   'setPresenterBounds',
   'refreshPresenterScale',
   'setPresenterSuspended',
   'destroyPresenter',
-  'setWindowBackdrop'
-]
-
-const LAYER_FUNCTION_NAMES = [
-  'configureFrameLink',
+  'setWindowBackdrop',
   'startPresenterLink',
   'stopPresenterLink',
   'presentSurface',
@@ -60,7 +62,16 @@ const LAYER_FUNCTION_NAMES = [
   'unobserveWindowOcclusion'
 ]
 
-const WINDOW_FUNCTION_NAMES = ['getVideoWindowHandle', 'adoptVideoWindow']
+const WINDOW_FUNCTION_NAMES = [
+  'createPresenter',
+  'setPresenterBounds',
+  'refreshPresenterScale',
+  'setPresenterSuspended',
+  'destroyPresenter',
+  'setWindowBackdrop',
+  'getVideoWindowHandle',
+  'adoptVideoWindow'
+]
 
 function makeAddon(presentationKind: string, functionNames: string[]): Record<string, unknown> {
   const addon: Record<string, unknown> = {}
@@ -70,7 +81,14 @@ function makeAddon(presentationKind: string, functionNames: string[]): Record<st
 }
 
 function makeLayerAddon(): Record<string, unknown> {
-  return makeAddon('layer', [...CORE_FUNCTION_NAMES, ...LAYER_FUNCTION_NAMES])
+  return makeAddon('layer', [...CORE_FUNCTION_NAMES, ...LAYER_RUNTIME_FUNCTION_NAMES])
+}
+
+function makePresenterAddon(): Record<string, unknown> {
+  const addon = makeAddon('unused', LAYER_PRESENTER_FUNCTION_NAMES)
+  delete addon.getPresentationKind
+  addon.getPresenterKind = () => 'layer'
+  return addon
 }
 
 function makeWindowAddon(): Record<string, unknown> {
@@ -82,7 +100,7 @@ describe('normalizeEmbeddedAddon', () => {
     const normalized = normalizeEmbeddedAddon(makeLayerAddon())
 
     assert.equal(normalized.presentationKind, 'layer')
-    assert.equal(typeof normalized.addon.presentSurface, 'function')
+    assert.equal(typeof normalized.addon.configureFrameLink, 'function')
   })
 
   test('tags a window-embedding backend with the kind it reports', () => {
@@ -105,23 +123,32 @@ describe('normalizeEmbeddedAddon', () => {
 
       assert.throws(
         () => normalizeEmbeddedAddon(addon),
-        /core API/,
+        /session API/,
         `Dropping ${missingName} must not load.`
       )
     }
   })
 
-  test('refuses a layer backend that cannot do the mach frame link', () => {
-    for (const missingName of LAYER_FUNCTION_NAMES) {
+  test('refuses a layer runtime that cannot configure the Mach sender', () => {
+    for (const missingName of LAYER_RUNTIME_FUNCTION_NAMES) {
       const addon = makeLayerAddon()
       delete addon[missingName]
 
       assert.throws(
         () => normalizeEmbeddedAddon(addon),
-        /mach frame-link/,
+        /Mach sender/,
         `Dropping ${missingName} must not load as layer.`
       )
     }
+  })
+
+  test('refuses the historical combined layer runtime and presenter surface', () => {
+    const combined = makeAddon('layer', [
+      ...CORE_FUNCTION_NAMES,
+      ...LAYER_RUNTIME_FUNCTION_NAMES,
+      ...LAYER_PRESENTER_FUNCTION_NAMES
+    ])
+    assert.throws(() => normalizeEmbeddedAddon(combined), /must not export.*presenter bridge/)
   })
 
   test('refuses a window backend that cannot embed its video window', () => {
@@ -142,7 +169,7 @@ describe('normalizeEmbeddedAddon', () => {
   test('refuses a backend whose facet does not match the kind it reports', () => {
     const layerShapedButReportingWindow = makeAddon('window', [
       ...CORE_FUNCTION_NAMES,
-      ...LAYER_FUNCTION_NAMES
+      ...LAYER_RUNTIME_FUNCTION_NAMES
     ])
 
     assert.throws(
@@ -159,7 +186,38 @@ describe('normalizeEmbeddedAddon', () => {
 
   test('refuses something that is not an addon at all', () => {
     for (const value of [null, undefined, 42, 'addon', {}]) {
-      assert.throws(() => normalizeEmbeddedAddon(value), /core API/)
+      assert.throws(() => normalizeEmbeddedAddon(value), /session API/)
     }
+  })
+})
+
+describe('normalizeEmbeddedPresenterAddon', () => {
+  test('accepts the libmpv-free layer presenter surface', () => {
+    const addon = normalizeEmbeddedPresenterAddon(makePresenterAddon())
+    assert.equal(addon.getPresenterKind(), 'layer')
+    assert.equal(typeof addon.presentSurface, 'function')
+  })
+
+  test('requires every presenter bridge function', () => {
+    for (const missingName of LAYER_PRESENTER_FUNCTION_NAMES) {
+      const addon = makePresenterAddon()
+      delete addon[missingName]
+      assert.throws(
+        () => normalizeEmbeddedPresenterAddon(addon),
+        /presenter bridge API/,
+        `Dropping ${missingName} must not load.`
+      )
+    }
+  })
+
+  test('rejects a presenter addon that also exports the libmpv session API', () => {
+    const combined = {
+      ...makePresenterAddon(),
+      ...makeAddon('layer', CORE_FUNCTION_NAMES)
+    }
+    assert.throws(
+      () => normalizeEmbeddedPresenterAddon(combined),
+      /must not export or load.*session API/
+    )
   })
 })

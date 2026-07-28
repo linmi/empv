@@ -135,7 +135,7 @@ pnpm run serve:backend:embedded-mpv
 
 The script rebuilds the native addon with `EMPV_ALLOW_HOMEBREW=1`. Use this only for local testing; release packaging rejects the resulting `homebrew-dev` runtime manifest.
 
-The desktop `afterPack` hook should copy `packages/empv/dist/native/` into unpacked app resources so the addon, runtime manifest, and runtime libraries are available as real files on macOS, Windows, and Linux.
+The desktop `afterPack` hook should copy `packages/empv/dist/native/` into unpacked app resources so the runtime addon, runtime manifest, and runtime libraries are available as real files on macOS, Windows, and Linux. On macOS the directory must also contain `empv_presenter.node`; Electron main loads only that libmpv-free AppKit/CALayer bridge, while the isolated playback process loads `empv.node`.
 
 During release packaging, `tools/packaging/electron-after-pack.cjs` verifies that the packaged app uses a `vendored-lgpl` runtime. macOS artifacts additionally verify that Mach-O dependencies have no `/opt/homebrew` or `/usr/local` dynamic links for embedded MPV.
 

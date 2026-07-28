@@ -8,11 +8,9 @@ mod session;
 
 pub use napi::dto::*;
 #[cfg(target_os = "macos")]
-pub use napi::macos::{
-    configure_frame_link, observe_window_occlusion, present_surface, start_presenter_link,
-    stop_presenter_link, unobserve_window_occlusion,
-};
+pub use napi::macos::configure_frame_link;
 pub use napi::playback::*;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub use napi::presenter::*;
 pub use napi::session::*;
 #[cfg(any(target_os = "windows", target_os = "linux"))]

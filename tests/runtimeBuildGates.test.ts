@@ -11,6 +11,7 @@
 // and ELF header constants are from those formats' specifications, and the meson
 // output is a verbatim line from a real mpv 0.41.0 cross-compile.
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 import test from 'node:test'
 
 import {
@@ -23,9 +24,18 @@ import {
 // tests rely on them rather than left to inference across the language boundary.
 type ForeignImport = { imported: string; reason: string }
 import { readBinaryTarget } from '../scripts/pack-platform-package.mjs'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+
+const require = createRequire(import.meta.url)
+const { validateMacosPresenterDependencies } =
+  require('../scripts/packaging/embedded-mpv-packaging.cjs') as {
+    validateMacosPresenterDependencies: (
+      presenterAddonPath: string,
+      dependencies: string[]
+    ) => string[]
+  }
 
 // Verbatim from a MinGW cross-compile of the pinned mpv, so a change to how
 // meson formats this line fails here rather than turning the gate into a no-op.
@@ -196,4 +206,45 @@ test('an unrecognised binary is refused rather than guessed at', () => {
   danglingPeOffset.write('MZ', 0, 'ascii')
   danglingPeOffset.writeUInt32LE(0xfffff, 0x3c)
   assert.throws(() => withBinary(danglingPeOffset, readBinaryTarget), /points past the end/)
+})
+
+test('the macOS presenter bridge accepts only its own install name and system dependencies', () => {
+  const presenterAddonPath = '/runtime/empv_presenter.node'
+  const dependencies = [
+    '@loader_path/empv_presenter.node',
+    '/usr/lib/libSystem.B.dylib',
+    '/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit'
+  ]
+
+  assert.deepEqual(validateMacosPresenterDependencies(presenterAddonPath, dependencies), [])
+})
+
+test('the macOS presenter bridge rejects libmpv and bundled third-party dependencies', () => {
+  const presenterAddonPath = '/runtime/empv_presenter.node'
+  const errors = validateMacosPresenterDependencies(presenterAddonPath, [
+    '@rpath/libmpv.2.dylib',
+    '@loader_path/lib/libavcodec.62.dylib'
+  ])
+
+  assert.ok(errors.some((error) => error.includes('must not link libmpv')))
+  assert.ok(errors.some((error) => error.includes('libavcodec.62.dylib')))
+})
+
+test('the macOS native build compiles disjoint runtime-sender and presenter-receiver roles', () => {
+  const runtimeBuild = readFileSync(path.join(process.cwd(), 'native/build.rs'), 'utf8')
+  const presenterBuild = readFileSync(path.join(process.cwd(), 'native/presenter/build.rs'), 'utf8')
+  const frameLink = readFileSync(
+    path.join(process.cwd(), 'native/shims/macos/frame_link.mm'),
+    'utf8'
+  )
+
+  assert.match(runtimeBuild, /define\("EMPV_MAC_FRAME_LINK_SENDER", None\)/)
+  assert.doesNotMatch(runtimeBuild, /\.files\(\[[\s\S]*"shims\/macos\/presenter\.mm"/)
+  assert.doesNotMatch(runtimeBuild, /\.files\(\[[\s\S]*"shims\/macos\/window\.mm"/)
+  assert.match(presenterBuild, /define\("EMPV_MAC_FRAME_LINK_RECEIVER", None\)/)
+  assert.doesNotMatch(presenterBuild, /\.files\(\[[\s\S]*"\.\.\/shims\/macos\/session_surface\.mm"/)
+  assert.match(
+    frameLink,
+    /defined\(EMPV_MAC_FRAME_LINK_SENDER\) == defined\(EMPV_MAC_FRAME_LINK_RECEIVER\)/
+  )
 })

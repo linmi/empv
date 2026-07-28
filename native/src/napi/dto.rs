@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use napi::bindgen_prelude::{Buffer, Either, Null};
 use napi_derive::napi;
 
-#[cfg(target_os = "macos")]
-use crate::presentation::macos;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::presentation::wid;
 use crate::session::snapshot;
@@ -91,17 +89,6 @@ impl JsAttachOptions {
             height: self.height,
         }
     }
-
-    #[cfg(target_os = "macos")]
-    pub fn macos_bounds(&self) -> macos::Bounds {
-        macos::Bounds {
-            x: self.x,
-            y: self.y,
-            width: self.width.max(1.0),
-            height: self.height.max(1.0),
-            corner_radius: self.corner_radius.unwrap_or(0.0).max(0.0),
-        }
-    }
 }
 
 #[napi(object)]
@@ -113,16 +100,6 @@ pub struct JsRenderSize {
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 impl From<wid::RenderSize> for JsRenderSize {
     fn from(value: wid::RenderSize) -> Self {
-        Self {
-            width_pixels: value.width_pixels,
-            height_pixels: value.height_pixels,
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl From<macos::RenderSize> for JsRenderSize {
-    fn from(value: macos::RenderSize) -> Self {
         Self {
             width_pixels: value.width_pixels,
             height_pixels: value.height_pixels,

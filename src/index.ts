@@ -1,7 +1,9 @@
 export {
   loadEmbeddedLibMpvAddon,
   loadEmbeddedLibMpvAddonFromPath,
+  loadEmbeddedLibMpvPresenterAddon,
   normalizeEmbeddedAddon,
+  normalizeEmbeddedPresenterAddon,
   type EmbeddedLibMpvAddonLoadOptions,
   type LibMpvAbLoop,
   type LibMpvCapturedFrame,
@@ -9,7 +11,8 @@ export {
   type LibMpvEmbeddedCoreAddon,
   type LibMpvEmbeddedNativeAddon,
   type LibMpvFrameNotifier,
-  type LibMpvLayerAddon,
+  type LibMpvLayerPresenterAddon,
+  type LibMpvLayerRuntimeAddon,
   type LibMpvPlayback,
   type LibMpvPresentationKind,
   type LibMpvRecordingState,
@@ -25,11 +28,13 @@ export {
   type LibMpvVideoLayerZOrder,
   type LibMpvWindowAddon,
   type LoadedEmbeddedLibMpvAddon,
+  type LoadedEmbeddedLibMpvPresenterAddon,
   type NormalizedEmbeddedAddon
 } from './embedded.ts'
 
 export {
   EMPV_NATIVE_ADDON_NAME,
+  EMPV_NATIVE_PRESENTER_ADDON_NAME,
   LIBMPV_RUNTIME_DIRECTORY_NAME,
   LibMpvRuntimeError,
   assertLibMpvRuntime,

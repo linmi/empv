@@ -322,19 +322,25 @@ async function releasePresenter(record, runtimeLost = false) {
 
 async function disposePlaybackSession(record) {
   const failures = []
+  log(`${record.presenterId}: destroying presenter`)
   try {
     await releasePresenter(record)
+    log(`${record.presenterId}: presenter destroyed`)
   } catch (error) {
     failures.push(error)
+    log(`${record.presenterId}: presenter destruction failed`)
   }
+  log(`${record.presenterId}: disposing runtime session ${record.runtimeSessionId}`)
   try {
     await client.invokeInGeneration(
       record.runtimeGeneration,
       'disposeSession',
       record.runtimeSessionId
     )
+    log(`${record.presenterId}: runtime session ${record.runtimeSessionId} disposed`)
   } catch (error) {
     failures.push(error)
+    log(`${record.presenterId}: runtime session ${record.runtimeSessionId} disposal failed`)
   }
   if (failures.length > 0) {
     throw new AggregateError(
@@ -360,9 +366,15 @@ async function run() {
   log('starting crash-isolated playback host')
   if (process.env.EMPV_SMOKE_ADDON_PATH) {
     // The existing cross-platform native smokes use this diagnostic override.
-    // Normalize it to the public runtime resolver key. Window backends load it
-    // only in the isolated runtime; layer also loads its presenter facet in main.
+    // Normalize it to the public runtime resolver key. The libmpv-linked addon
+    // is loaded only in the isolated runtime on every platform.
     process.env.EMPV_ADDON_PATH = path.resolve(process.env.EMPV_SMOKE_ADDON_PATH)
+  }
+  if (process.env.EMPV_SMOKE_PRESENTER_ADDON_PATH) {
+    // macOS main loads only this libmpv-free bridge.
+    process.env.EMPV_PRESENTER_ADDON_PATH = path.resolve(
+      process.env.EMPV_SMOKE_PRESENTER_ADDON_PATH
+    )
   }
   const frameLinkServiceName = createEmpvFrameLinkServiceName()
   const resolveLinuxNodeExecutablePath = () => {

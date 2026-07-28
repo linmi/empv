@@ -30,9 +30,10 @@ const char* empv_wid_last_error(void) EMPV_WID_NOEXCEPT;
  *   video window.
  * - host_destroy is idempotent and releases the native window while retaining
  *   the opaque owner. host_free also destroys an open window.
- * - On Win32, host_open, host_hide, host_destroy, and host_free must all run on
- *   the thread that successfully called host_open. A wrong-thread call fails
- *   without destroying or freeing the owner.
+ * - On Win32, each host owns a dedicated native message thread. Public calls
+ *   synchronously marshal bounded commands to that thread, so Electron utility
+ *   IPC never becomes the HWND message pump and a hung window command reports
+ *   an error instead of waiting forever.
  */
 EmpvWidHost* empv_wid_host_create(void)
     EMPV_WID_NOEXCEPT;
@@ -59,7 +60,8 @@ int32_t empv_wid_host_destroy(EmpvWidHost* host)
  *   connection on Linux; no product state on Win32).
  * - Every operation is a single platform action. Rust owns parent/child/bounds,
  *   attachment, suspension, sequencing, rollback, and lifecycle decisions.
- * - Calls must be serialized on the owning application thread.
+ * - Calls must be serialized on the owning application thread. Win32 then
+ *   marshals each platform action to the HWND owner thread.
  */
 EmpvWidPresenter* empv_wid_presenter_create(void)
     EMPV_WID_NOEXCEPT;

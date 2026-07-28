@@ -21,10 +21,11 @@ import {
 
 // Isolated playback process: owns embedded mpv sessions and, for the window
 // backend, the native presenter that adopts each session's child video window.
-// Keeping both HWND-owning resources on this process/thread boundary prevents
-// synchronous cross-thread Win32 presentation calls from blocking Electron's
-// main process. The macOS layer presenter remains in the main process and
-// receives rendered IOSurfaces over the frame link.
+// Keeping both HWND-owning resources in this process prevents native failures
+// from reaching Electron main. On Windows the HWND itself belongs to a dedicated
+// native message thread, so cross-process parent-window messages cannot occupy
+// this JavaScript/IPC thread. The macOS layer presenter remains in the main
+// process and receives rendered IOSurfaces over the frame link.
 //
 // This module is the whole playback process. A consumer's runtime entry is
 // expected to be nothing but:

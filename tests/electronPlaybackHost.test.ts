@@ -6,7 +6,7 @@ import {
   createEmpvFrameLinkServiceName,
   createEmpvPlaybackHost
 } from '../src/electron/playbackHost.ts'
-import { makeLayerAddon, makeWindowAddon } from './support/fakeAddon.ts'
+import { makeLayerPresenterAddon } from './support/fakeAddon.ts'
 import { makeFakeRuntimeClient } from './support/fakeClient.ts'
 
 const WINDOW_HANDLE = Buffer.from([1, 2, 3, 4])
@@ -28,13 +28,13 @@ function createDeferred<Value>(): {
 describe('createEmpvPlaybackHost', () => {
   test('hands the client the same frame-link name it registers with the addon', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeLayerAddon()
+    const { loaded, calls } = makeLayerPresenterAddon()
     const frameLinkServiceName = createEmpvFrameLinkServiceName()
 
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName,
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
 
     const registration = calls.find((call) => call.method === 'startPresenterLink')
@@ -47,13 +47,13 @@ describe('createEmpvPlaybackHost', () => {
 
   test('keeps a window backend entirely out of Electron main', async () => {
     const fakeClient = makeFakeRuntimeClient({ presentationKind: 'window' })
-    const { loaded, calls } = makeWindowAddon()
+    const { loaded, calls } = makeLayerPresenterAddon()
     let mainLoads = 0
 
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => {
+      loadPresenterAddon: async () => {
         mainLoads += 1
         return loaded
       }
@@ -64,8 +64,8 @@ describe('createEmpvPlaybackHost', () => {
     assert.deepEqual(calls, [])
   })
 
-  test('probes the real runtime backend before loading the layer addon in main', async () => {
-    const { loaded } = makeLayerAddon()
+  test('probes the real runtime backend before loading the presenter addon in main', async () => {
+    const { loaded } = makeLayerPresenterAddon()
     const order: string[] = []
     const probing = makeFakeRuntimeClient({
       invoke: (method) => {
@@ -77,17 +77,17 @@ describe('createEmpvPlaybackHost', () => {
     await createEmpvPlaybackHost({
       client: probing.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => {
-        order.push('main:loadAddon')
+      loadPresenterAddon: async () => {
+        order.push('main:loadPresenterAddon')
         return loaded
       }
     })
 
-    assert.deepEqual(order, ['utility:probe', 'main:loadAddon'])
+    assert.deepEqual(order, ['utility:probe', 'main:loadPresenterAddon'])
   })
 
   test('fails explicitly when runtime probing fails and never loads main native code', async () => {
-    const { loaded } = makeLayerAddon()
+    const { loaded } = makeLayerPresenterAddon()
     let loadedInMain = false
 
     await assert.rejects(
@@ -98,7 +98,7 @@ describe('createEmpvPlaybackHost', () => {
           }
         }).client,
         frameLinkServiceName: createEmpvFrameLinkServiceName(),
-        loadAddon: async () => {
+        loadPresenterAddon: async () => {
           loadedInMain = true
           return loaded
         }
@@ -121,9 +121,9 @@ describe('createEmpvPlaybackHost', () => {
       createEmpvPlaybackHost({
         client: fakeClient.client,
         frameLinkServiceName: createEmpvFrameLinkServiceName(),
-        loadAddon: async () => {
+        loadPresenterAddon: async () => {
           loadedInMain = true
-          return makeWindowAddon().loaded
+          return makeLayerPresenterAddon().loaded
         }
       }),
       /window presentation is unsupported/
@@ -131,19 +131,21 @@ describe('createEmpvPlaybackHost', () => {
     assert.equal(loadedInMain, false)
   })
 
-  test('rejects a runtime/main backend mismatch', async () => {
+  test('surfaces a presenter addon load failure after the runtime probe', async () => {
     await assert.rejects(
       createEmpvPlaybackHost({
         client: makeFakeRuntimeClient().client,
         frameLinkServiceName: createEmpvFrameLinkServiceName(),
-        loadAddon: async () => makeWindowAddon().loaded
+        loadPresenterAddon: async () => {
+          throw new Error('presenter bridge load failed')
+        }
       }),
-      /runtime reports layer.*main addon reports window/
+      /presenter bridge load failed/
     )
   })
 
   test('stops a newly-started layer link when frame subscription fails', async () => {
-    const { loaded, calls } = makeLayerAddon()
+    const { loaded, calls } = makeLayerPresenterAddon()
     const fakeClient = makeFakeRuntimeClient({
       onFrame: () => {
         throw new Error('frame subscription failed')
@@ -154,7 +156,7 @@ describe('createEmpvPlaybackHost', () => {
       createEmpvPlaybackHost({
         client: fakeClient.client,
         frameLinkServiceName: createEmpvFrameLinkServiceName(),
-        loadAddon: async () => loaded
+        loadPresenterAddon: async () => loaded
       }),
       /frame subscription failed/
     )
@@ -164,12 +166,12 @@ describe('createEmpvPlaybackHost', () => {
 
   test('presents a bound session frame with the arguments the presenter expects', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeLayerAddon()
+    const { loaded, calls } = makeLayerPresenterAddon()
 
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
 
     // Branching before reaching createPresenter is not ceremony: the two backends
@@ -205,12 +207,12 @@ describe('createEmpvPlaybackHost', () => {
 
   test('drops frames for a session that is not bound to a presenter', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeLayerAddon()
+    const { loaded, calls } = makeLayerPresenterAddon()
 
     await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
 
     fakeClient.emitFrame({
@@ -228,12 +230,12 @@ describe('createEmpvPlaybackHost', () => {
 
   test('stops presenting before a presenter is destroyed', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeLayerAddon()
+    const { loaded, calls } = makeLayerPresenterAddon()
 
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
 
     if (host.presentationKind !== 'layer') {
@@ -269,7 +271,7 @@ describe('createEmpvPlaybackHost', () => {
   test('reports a failed present instead of throwing into the frame callback', async () => {
     const fakeClient = makeFakeRuntimeClient()
     const failures: string[] = []
-    const { loaded } = makeLayerAddon({
+    const { loaded } = makeLayerPresenterAddon({
       presentSurface: () => {
         throw new Error('presenter is gone')
       }
@@ -278,7 +280,7 @@ describe('createEmpvPlaybackHost', () => {
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded,
+      loadPresenterAddon: async () => loaded,
       onPresentFailed: (_error, sessionId) => failures.push(sessionId)
     })
 
@@ -305,11 +307,11 @@ describe('createEmpvPlaybackHost', () => {
 
   test('rejects duplicate presenters and non-existent bindings before reaching native code', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeLayerAddon()
+    const { loaded, calls } = makeLayerPresenterAddon()
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
     if (host.presentationKind !== 'layer') {
       throw new Error(`expected the layer host, got ${host.presentationKind}`)
@@ -339,11 +341,11 @@ describe('createEmpvPlaybackHost', () => {
   })
 
   test('enforces one-to-one session and presenter bindings', async () => {
-    const { loaded } = makeLayerAddon()
+    const { loaded } = makeLayerPresenterAddon()
     const host = await createEmpvPlaybackHost({
       client: makeFakeRuntimeClient().client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
     if (host.presentationKind !== 'layer') {
       throw new Error(`expected the layer host, got ${host.presentationKind}`)
@@ -371,7 +373,7 @@ describe('createEmpvPlaybackHost', () => {
 
   test('removes frame routing before native presenter destruction starts', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeLayerAddon({
+    const { loaded, calls } = makeLayerPresenterAddon({
       destroyPresenter: () => {
         fakeClient.emitFrame({
           sessionId: 'session-1',
@@ -384,7 +386,7 @@ describe('createEmpvPlaybackHost', () => {
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
     if (host.presentationKind !== 'layer') {
       throw new Error(`expected the layer host, got ${host.presentationKind}`)
@@ -409,7 +411,7 @@ describe('createEmpvPlaybackHost', () => {
   test('retains failed presenter destruction as cleanup-only ownership and allows an explicit retry', async () => {
     const fakeClient = makeFakeRuntimeClient()
     let destructionAttempts = 0
-    const { loaded, calls } = makeLayerAddon({
+    const { loaded, calls } = makeLayerPresenterAddon({
       destroyPresenter: () => {
         destructionAttempts += 1
         if (destructionAttempts === 1) {
@@ -420,7 +422,7 @@ describe('createEmpvPlaybackHost', () => {
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
     if (host.presentationKind !== 'layer') {
       throw new Error(`expected the layer host, got ${host.presentationKind}`)
@@ -470,11 +472,11 @@ describe('createEmpvPlaybackHost', () => {
 
   test('disposes every presenter, the frame listener and the layer link exactly once', async () => {
     const fakeClient = makeFakeRuntimeClient()
-    const { loaded, calls } = makeLayerAddon()
+    const { loaded, calls } = makeLayerPresenterAddon()
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
     if (host.presentationKind !== 'layer') {
       throw new Error(`expected the layer host, got ${host.presentationKind}`)
@@ -521,7 +523,7 @@ describe('createEmpvPlaybackHost', () => {
 
   test('retries only unfinished host cleanup after disposal fails', async () => {
     let firstPresenterAttempt = true
-    const { loaded, calls } = makeLayerAddon({
+    const { loaded, calls } = makeLayerPresenterAddon({
       destroyPresenter: (presenterId) => {
         if (presenterId === 'presenter-1' && firstPresenterAttempt) {
           firstPresenterAttempt = false
@@ -532,7 +534,7 @@ describe('createEmpvPlaybackHost', () => {
     const host = await createEmpvPlaybackHost({
       client: makeFakeRuntimeClient().client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
     if (host.presentationKind !== 'layer') {
       throw new Error(`expected the layer host, got ${host.presentationKind}`)
@@ -587,7 +589,7 @@ describe('createEmpvPlaybackHost', () => {
   })
 
   test('continues host disposal after presenter cleanup failures and reports them together', async () => {
-    const { loaded, calls } = makeLayerAddon({
+    const { loaded, calls } = makeLayerPresenterAddon({
       destroyPresenter: (presenterId) => {
         throw new Error(`cannot close ${presenterId}`)
       }
@@ -595,7 +597,7 @@ describe('createEmpvPlaybackHost', () => {
     const host = await createEmpvPlaybackHost({
       client: makeFakeRuntimeClient().client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadPresenterAddon: async () => loaded
     })
     if (host.presentationKind !== 'layer') {
       throw new Error(`expected the layer host, got ${host.presentationKind}`)
@@ -642,7 +644,7 @@ describe('createEmpvPlaybackHost', () => {
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => {
+      loadPresenterAddon: async () => {
         throw new Error('window host must not load main native code')
       }
     })
@@ -816,12 +818,12 @@ describe('createEmpvPlaybackHost', () => {
     const layerHost = await createEmpvPlaybackHost({
       client: makeFakeRuntimeClient().client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => makeLayerAddon().loaded
+      loadPresenterAddon: async () => makeLayerPresenterAddon().loaded
     })
     const windowHost = await createEmpvPlaybackHost({
       client: makeFakeRuntimeClient({ presentationKind: 'window' }).client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => makeWindowAddon().loaded
+      loadPresenterAddon: async () => makeLayerPresenterAddon().loaded
     })
 
     assert.equal(layerHost.presentationKind, 'layer')

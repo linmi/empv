@@ -7,6 +7,7 @@ node_modules/
 # Build output.
 native/build/
 native/target/
+native/presenter/target/
 dist/
 platform-packages/
 

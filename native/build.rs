@@ -28,8 +28,6 @@ fn build_macos_shims() {
         "shims/macos/native_platform_internal.h",
         "shims/macos/session_surface.mm",
         "shims/macos/frame_link.mm",
-        "shims/macos/presenter.mm",
-        "shims/macos/window.mm",
     ] {
         println!("cargo:rerun-if-changed={source}");
     }
@@ -39,10 +37,9 @@ fn build_macos_shims() {
         .files([
             "shims/macos/session_surface.mm",
             "shims/macos/frame_link.mm",
-            "shims/macos/presenter.mm",
-            "shims/macos/window.mm",
         ])
         .include("shims/macos")
+        .define("EMPV_MAC_FRAME_LINK_SENDER", None)
         .define("GL_SILENCE_DEPRECATION", None)
         .flag("-fobjc-arc")
         .flag(&deployment_flag)
@@ -55,14 +52,7 @@ fn build_macos_shims() {
         library.link_dir.display()
     );
     println!("cargo:rustc-link-lib=dylib=mpv");
-    for framework in [
-        "AppKit",
-        "CoreVideo",
-        "Foundation",
-        "IOSurface",
-        "OpenGL",
-        "QuartzCore",
-    ] {
+    for framework in ["CoreVideo", "Foundation", "IOSurface", "OpenGL"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-arg={deployment_flag}");

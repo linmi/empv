@@ -11,6 +11,7 @@ import { LibMpvRuntimeError, assertLibMpvRuntime, resolveLibMpvRuntime } from '.
 // under addon/, the shared library under lib/. Names are the real artifact names
 // mpv and napi produce, not values read back out of the resolver.
 const ADDON_RELATIVE_PATH = join('addon', 'empv.node')
+const PRESENTER_ADDON_RELATIVE_PATH = join('addon', 'empv_presenter.node')
 const DARWIN_LIBRARY_RELATIVE_PATH = join('lib', 'libmpv.dylib')
 
 const temporaryRoots: string[] = []
@@ -29,6 +30,7 @@ function writeFile(path: string, contents = ''): void {
 // A complete darwin-arm64 runtime directory.
 function stageRuntimeDirectory(directory: string): string {
   writeFile(join(directory, ADDON_RELATIVE_PATH))
+  writeFile(join(directory, PRESENTER_ADDON_RELATIVE_PATH))
   writeFile(join(directory, DARWIN_LIBRARY_RELATIVE_PATH))
   return directory
 }
@@ -54,6 +56,7 @@ describe('resolveLibMpvRuntime', () => {
     assert.equal(runtime.available, true)
     assert.equal(runtime.runtimeDirectory, directory)
     assert.equal(runtime.addonPath, join(directory, ADDON_RELATIVE_PATH))
+    assert.equal(runtime.presenterAddonPath, join(directory, PRESENTER_ADDON_RELATIVE_PATH))
     assert.equal(runtime.libraryPath, join(directory, DARWIN_LIBRARY_RELATIVE_PATH))
     assert.deepEqual(runtime.missing, [])
   })
@@ -128,12 +131,14 @@ describe('resolveLibMpvRuntime', () => {
     assert.equal(runtime.available, false)
     assert.deepEqual(runtime.missing, ['runtime-directory'])
     assert.equal(runtime.addonPath, null)
+    assert.equal(runtime.presenterAddonPath, null)
     assert.equal(runtime.libraryPath, null)
   })
 
   test('names the parts that are absent from an incomplete runtime', async () => {
     const directory = makeTemporaryDirectory()
     writeFile(join(directory, DARWIN_LIBRARY_RELATIVE_PATH))
+    writeFile(join(directory, PRESENTER_ADDON_RELATIVE_PATH))
 
     const withoutAddon = await resolveLibMpvRuntime({
       ...darwinOptions,
@@ -142,26 +147,42 @@ describe('resolveLibMpvRuntime', () => {
     assert.equal(withoutAddon.available, false)
     assert.deepEqual(withoutAddon.missing, ['native-addon'])
 
-    const libraryOnly = makeTemporaryDirectory()
-    writeFile(join(libraryOnly, ADDON_RELATIVE_PATH))
+    const runtimeWithoutLibrary = makeTemporaryDirectory()
+    writeFile(join(runtimeWithoutLibrary, ADDON_RELATIVE_PATH))
+    writeFile(join(runtimeWithoutLibrary, PRESENTER_ADDON_RELATIVE_PATH))
 
     const withoutLibrary = await resolveLibMpvRuntime({
       ...darwinOptions,
-      runtimeDirectory: libraryOnly
+      runtimeDirectory: runtimeWithoutLibrary
     })
     assert.equal(withoutLibrary.available, false)
     assert.deepEqual(withoutLibrary.missing, ['libmpv-library'])
+
+    const runtimeWithoutPresenter = makeTemporaryDirectory()
+    writeFile(join(runtimeWithoutPresenter, ADDON_RELATIVE_PATH))
+    writeFile(join(runtimeWithoutPresenter, DARWIN_LIBRARY_RELATIVE_PATH))
+    const withoutPresenter = await resolveLibMpvRuntime({
+      ...darwinOptions,
+      runtimeDirectory: runtimeWithoutPresenter
+    })
+    assert.equal(withoutPresenter.available, false)
+    assert.deepEqual(withoutPresenter.missing, ['native-presenter-addon'])
   })
 
   test('reads the paths a runtime manifest declares', async () => {
     const directory = makeTemporaryDirectory()
     writeFile(join(directory, 'custom', 'addon.node'))
+    writeFile(join(directory, 'custom', 'presenter.node'))
     writeFile(join(directory, 'custom', 'mpv.dylib'))
     writeFile(
       join(directory, 'runtime-manifest.json'),
       JSON.stringify({
         id: 'libmpv',
-        files: { addon: 'custom/addon.node', library: 'custom/mpv.dylib' }
+        files: {
+          addon: 'custom/addon.node',
+          presenterAddon: 'custom/presenter.node',
+          library: 'custom/mpv.dylib'
+        }
       })
     )
 
@@ -169,6 +190,7 @@ describe('resolveLibMpvRuntime', () => {
 
     assert.equal(runtime.available, true)
     assert.equal(runtime.addonPath, join(directory, 'custom', 'addon.node'))
+    assert.equal(runtime.presenterAddonPath, join(directory, 'custom', 'presenter.node'))
     assert.equal(runtime.libraryPath, join(directory, 'custom', 'mpv.dylib'))
   })
 })

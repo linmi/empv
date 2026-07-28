@@ -462,6 +462,36 @@ function validateNoForbiddenRuntimeLinks(binaryPaths) {
   return errors
 }
 
+function validateMacosPresenterDependencies(presenterAddonPath, dependencies) {
+  const errors = []
+  for (const dependency of dependencies) {
+    if (path.basename(dependency) === path.basename(presenterAddonPath)) {
+      continue
+    }
+    if (!isSystemDependency(dependency)) {
+      errors.push(
+        `macOS presenter addon must depend only on system frameworks/libraries, found ${dependency} in ${presenterAddonPath}`
+      )
+    }
+    if (dependency.toLowerCase().includes('mpv')) {
+      errors.push(
+        `macOS presenter addon must not link libmpv, found ${dependency} in ${presenterAddonPath}`
+      )
+    }
+  }
+  return errors
+}
+
+function validateMacosPresenterAddon(presenterAddonPath) {
+  if (!fs.existsSync(presenterAddonPath)) {
+    return [`Missing libmpv-free macOS presenter addon: ${presenterAddonPath}`]
+  }
+  return validateMacosPresenterDependencies(
+    presenterAddonPath,
+    parseOtoolDependencies(presenterAddonPath)
+  )
+}
+
 function getPackagedRuntimeCandidates(libDir, platform, nativeDir) {
   switch (platform) {
     case 'darwin':
@@ -498,6 +528,7 @@ function validatePackagedEmbeddedMpv(resourceDir, options = {}) {
   const platform = normalizeEmbeddedMpvPlatform(options.platform)
   const unpackedNativeDir = options.nativeDir ?? path.join(resourceDir, 'libmpv', 'native')
   const addonPath = path.join(unpackedNativeDir, 'empv.node')
+  const presenterAddonPath = path.join(unpackedNativeDir, 'empv_presenter.node')
   const libDir = path.join(unpackedNativeDir, 'lib')
   const manifestPath = path.join(unpackedNativeDir, 'runtime-manifest.json')
   const errors = []
@@ -536,6 +567,7 @@ function validatePackagedEmbeddedMpv(resourceDir, options = {}) {
   }
 
   if (platform === 'darwin') {
+    errors.push(...validateMacosPresenterAddon(presenterAddonPath))
     if (!hasRequiredMacosAudioOutputBackend(addonPath)) {
       errors.push(
         `Embedded MPV native addon is missing the required AVFoundation audio backend policy: ${addonPath}`
@@ -579,6 +611,8 @@ module.exports = {
   parseOtoolDependencies,
   parseOtoolRpaths,
   patchAddonForBundledRuntime,
+  validateMacosPresenterAddon,
+  validateMacosPresenterDependencies,
   validateNoForbiddenRuntimeLinks,
   getPackagedRuntimeCandidates,
   validatePackagedEmbeddedMpv

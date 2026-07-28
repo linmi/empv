@@ -21,6 +21,10 @@ describe('integrated Electron playback smoke', () => {
       join(process.cwd(), 'src/electron/nodeRuntimeFork.ts'),
       'utf8'
     )
+    const windowsWidShim = readFileSync(
+      join(process.cwd(), 'native/shims/wid/native_window_win32.cc'),
+      'utf8'
+    )
     const workflow = readFileSync(
       join(process.cwd(), '.github/workflows/native-compile.yml'),
       'utf8'
@@ -38,7 +42,15 @@ describe('integrated Electron playback smoke', () => {
     assert.doesNotMatch(nodeRuntimeFork, /process\.execPath/)
     assert.doesNotMatch(nodeRuntimeFork, /ELECTRON_RUN_AS_NODE: ['"]1['"]/)
     assert.doesNotMatch(nodeRuntimeFork, /RTLD_DEEPBIND/)
+    assert.match(windowsWidShim, /std::thread windowThread_/)
+    assert.match(windowsWidShim, /while \(GetMessageW\(/)
+    assert.match(windowsWidShim, /SendMessageTimeoutW\(/)
+    assert.match(windowsWidShim, /SMTO_ABORTIFHUNG \| SMTO_BLOCK/)
+    assert.match(windowsWidShim, /commandTimeoutMs = 5'000/)
+    assert.doesNotMatch(windowsWidShim, /SetParent\(child, nullptr\)/)
     assert.match(smoke, /createEmpvRuntimeClient\(\{/)
+    assert.match(smoke, /EMPV_SMOKE_PRESENTER_ADDON_PATH/)
+    assert.match(smoke, /EMPV_PRESENTER_ADDON_PATH/)
     assert.match(smoke, /runtime backend probed as \$\{host\.presentationKind\}/)
     assert.match(smoke, /creating runtime session/)
     assert.match(smoke, /runtime session \$\{runtimeSessionId\} created/)
@@ -68,6 +80,9 @@ describe('integrated Electron playback smoke', () => {
     assert.match(workflow, /Install ffmpeg smoke dependency[\s\S]*choco install ffmpeg/)
     assert.match(workflow, /Stage the pinned runtime beside empv\.node/)
     assert.match(workflow, /EMPV_SMOKE_ADDON_PATH=\$nodeFile/)
+    assert.match(workflow, /empv_presenter\.node/)
+    assert.match(workflow, /EMPV_SMOKE_PRESENTER_ADDON_PATH/)
+    assert.match(workflow, /must not load libmpv or bundled third-party libraries/)
     assert.match(workflow, /Run the Windows native runtime and presenter smoke/)
     assert.match(workflow, /Run crash-isolated Electron playback smoke/)
     assert.match(workflow, /Run crash-isolated Electron playback smoke under Xvfb/)
@@ -77,7 +92,7 @@ describe('integrated Electron playback smoke', () => {
     )
     assert.match(
       workflow,
-      /Stage the pinned runtime beside empv\.node[\s\S]*Run crash-isolated Electron playback smoke\s+timeout-minutes: 3\s+run: pnpm run smoke:electron-playback/
+      /Stage the pinned runtime beside empv\.node[\s\S]*Run crash-isolated Electron playback smoke\s+timeout-minutes: 1\s+run: pnpm run smoke:electron-playback/
     )
     assert.match(
       workflow,

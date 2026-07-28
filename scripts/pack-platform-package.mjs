@@ -220,6 +220,11 @@ function main() {
       `No built addon at ${sourceDirectory}/empv.node. Run "pnpm run build:native" for ${platform}-${arch} first.`
     )
   }
+  if (platform === 'darwin' && !existsSync(path.join(sourceDirectory, 'empv_presenter.node'))) {
+    return fail(
+      `No libmpv-free presenter addon at ${sourceDirectory}/empv_presenter.node. Run "pnpm run build:native" for ${platform}-${arch} first.`
+    )
+  }
 
   const addonPath = path.join(sourceDirectory, 'empv.node')
   const built = readBinaryTarget(addonPath)
@@ -228,6 +233,14 @@ function main() {
       `${path.relative(packageRoot, addonPath)} is a ${built.platform}-${built.arch} binary, ` +
         `but this would package it as ${platform}-${arch}.`
     )
+  }
+  if (platform === 'darwin') {
+    const presenterBuilt = readBinaryTarget(path.join(sourceDirectory, 'empv_presenter.node'))
+    if (presenterBuilt.platform !== platform || presenterBuilt.arch !== arch) {
+      return fail(
+        `${path.relative(packageRoot, path.join(sourceDirectory, 'empv_presenter.node'))} is a ${presenterBuilt.platform}-${presenterBuilt.arch} binary, but this would package it as ${platform}-${arch}.`
+      )
+    }
   }
 
   const bundlesRuntime = BUNDLES_RUNTIME.has(platform)
@@ -264,6 +277,12 @@ function main() {
   mkdirSync(outputDirectory, { recursive: true })
 
   cpSync(path.join(sourceDirectory, 'empv.node'), path.join(outputDirectory, 'empv.node'))
+  if (platform === 'darwin') {
+    cpSync(
+      path.join(sourceDirectory, 'empv_presenter.node'),
+      path.join(outputDirectory, 'empv_presenter.node')
+    )
+  }
   if (existsSync(manifestPath)) {
     cpSync(manifestPath, path.join(outputDirectory, 'runtime-manifest.json'))
   } else {
@@ -273,7 +292,12 @@ function main() {
     )
   }
 
-  const files = ['empv.node', 'runtime-manifest.json', ...LICENCE_FILES]
+  const files = [
+    'empv.node',
+    ...(platform === 'darwin' ? ['empv_presenter.node'] : []),
+    'runtime-manifest.json',
+    ...LICENCE_FILES
+  ]
 
   if (bundlesRuntime && platform === 'darwin') {
     const libraryDirectory = path.join(sourceDirectory, 'lib')
@@ -324,7 +348,9 @@ function main() {
       {
         name,
         version: mainManifest.version,
-        description: `Prebuilt empv addon${bundlesRuntime ? ' and libmpv runtime' : ''} for ${platform}-${arch}.`,
+        description: `Prebuilt empv runtime addon${
+          platform === 'darwin' ? ' and libmpv-free presenter bridge' : ''
+        }${bundlesRuntime ? ' with libmpv runtime' : ''} for ${platform}-${arch}.`,
         license: mainManifest.license,
         author: mainManifest.author,
         homepage: mainManifest.homepage,
@@ -344,6 +370,9 @@ function main() {
       `Prebuilt \`empv.node\`${bundlesRuntime ? ' and the libmpv runtime it loads' : ''} for ` +
       `${platform}-${arch}. Installed automatically as an optional dependency of ` +
       `[\`empv\`](https://github.com/linmi/empv); there is no reason to depend on it directly.\n` +
+      (platform === 'darwin'
+        ? '\nThis package also carries `empv_presenter.node`, the AppKit/CALayer bridge loaded by Electron main. It links only Apple system frameworks and never loads libmpv.\n'
+        : '') +
       (bundlesRuntime
         ? '\nThe bundled libmpv and FFmpeg are LGPL-2.1-or-later, built from pinned ' +
           'sources without `--enable-gpl`. See `THIRD-PARTY-NOTICES.md` for their versions ' +

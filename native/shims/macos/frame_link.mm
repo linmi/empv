@@ -11,13 +11,19 @@
 #include <new>
 #include <string>
 
+#if defined(EMPV_MAC_FRAME_LINK_SENDER) == defined(EMPV_MAC_FRAME_LINK_RECEIVER)
+#error "Build frame_link.mm with exactly one frame-link role."
+#endif
+
 namespace {
 
 constexpr uint32_t kFrameLinkMagic = 0x524d5046;
 constexpr uint32_t kFrameLinkVersion = 1;
 constexpr size_t kFrameLinkSessionIdMax = 64;
 constexpr mach_msg_id_t kFrameLinkMessageId = 0x524d5046;
+#if defined(EMPV_MAC_FRAME_LINK_RECEIVER)
 char kReceiverQueueKey;
+#endif
 
 struct FrameLinkPayload {
     uint32_t magic;
@@ -36,6 +42,7 @@ struct FrameLinkPoolMessage {
     FrameLinkPayload payload;
 };
 
+#if defined(EMPV_MAC_FRAME_LINK_RECEIVER)
 struct FrameLinkPoolMessageReceive {
     FrameLinkPoolMessage message;
     mach_msg_trailer_t trailer;
@@ -52,14 +59,18 @@ void destroy_pool(EmpvMacFramePool* pool) {
     }
     delete pool;
 }
+#endif
 
 }  // namespace
 
+#if defined(EMPV_MAC_FRAME_LINK_SENDER)
 struct EmpvMacFrameSender {
     std::string service_name;
     mach_port_t send_port = MACH_PORT_NULL;
 };
+#endif
 
+#if defined(EMPV_MAC_FRAME_LINK_RECEIVER)
 struct EmpvMacFrameReceiver {
     mach_port_t receive_port = MACH_PORT_NULL;
     dispatch_queue_t queue = nullptr;
@@ -71,9 +82,11 @@ struct EmpvMacFrameReceiver {
     EmpvMacFramePoolCallback callback = nullptr;
     EmpvMacContextReleaseCallback release_context = nullptr;
 };
+#endif
 
 namespace {
 
+#if defined(EMPV_MAC_FRAME_LINK_SENDER)
 void deallocate_surface_ports(mach_port_t* ports) {
     for (int32_t index = 0; index < EMPV_MAC_SURFACE_COUNT; index += 1) {
         if (ports[index] != MACH_PORT_NULL) {
@@ -82,7 +95,9 @@ void deallocate_surface_ports(mach_port_t* ports) {
         }
     }
 }
+#endif
 
+#if defined(EMPV_MAC_FRAME_LINK_RECEIVER)
 void receive_pool_message(
     EmpvMacFrameReceiver* receiver,
     FrameLinkPoolMessage& message
@@ -174,9 +189,11 @@ void drain_messages(EmpvMacFrameReceiver* receiver) {
         }
     }
 }
+#endif
 
 }  // namespace
 
+#if defined(EMPV_MAC_FRAME_LINK_SENDER)
 extern "C" EmpvMacFrameSender* empv_mac_frame_sender_create(
     const char* service_name,
     char* error_message,
@@ -315,7 +332,9 @@ extern "C" int32_t empv_mac_frame_sender_send_pool(
     }
     return 0;
 }
+#endif
 
+#if defined(EMPV_MAC_FRAME_LINK_RECEIVER)
 extern "C" EmpvMacFrameReceiver* empv_mac_frame_receiver_create(
     const char* service_name,
     void* callback_context,
@@ -447,3 +466,4 @@ extern "C" void empv_mac_frame_pool_size(
         *size = pool ? pool->size : EmpvMacRenderSize{};
     }
 }
+#endif

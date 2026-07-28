@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url'
 export type LibMpvRuntimePlatform = NodeJS.Platform
 export type LibMpvRuntimeArch = NodeJS.Architecture
 
-export type LibMpvRuntimeMissingPart = 'runtime-directory' | 'native-addon' | 'libmpv-library'
+export type LibMpvRuntimeMissingPart =
+  | 'runtime-directory'
+  | 'native-addon'
+  | 'native-presenter-addon'
+  | 'libmpv-library'
 
 export type LibMpvRuntimeManifest = {
   id?: 'libmpv' | string
@@ -21,6 +25,7 @@ export type LibMpvRuntimeManifest = {
   }
   files?: {
     addon?: string
+    presenterAddon?: string
     include?: string
     library?: string
     libraries?: string[]
@@ -38,6 +43,7 @@ export type ResolvedLibMpvRuntime = {
   missing: LibMpvRuntimeMissingPart[]
   platform: LibMpvRuntimePlatform
   platformKey: string
+  presenterAddonPath: string | null
   runtimeDirectory: string | null
 }
 
@@ -59,10 +65,12 @@ export type LibMpvRuntimeResolveOptions = {
 
 export const LIBMPV_RUNTIME_DIRECTORY_NAME = 'libmpv'
 export const EMPV_NATIVE_ADDON_NAME = 'empv.node'
+export const EMPV_NATIVE_PRESENTER_ADDON_NAME = 'empv_presenter.node'
 
 const RUNTIME_MANIFEST_FILE_NAME = 'runtime-manifest.json'
 const ENV_RUNTIME_DIRECTORY = 'EMPV_RUNTIME_DIR'
 const ENV_ADDON_PATH = 'EMPV_ADDON_PATH'
+const ENV_PRESENTER_ADDON_PATH = 'EMPV_PRESENTER_ADDON_PATH'
 const ENV_LIBRARY_PATH = 'EMPV_LIBRARY_PATH'
 const ENV_RESOURCE_ROOT = 'EMPV_RESOURCE_ROOT'
 
@@ -246,6 +254,22 @@ function getAddonCandidatePaths(
   ])
 }
 
+function getPresenterAddonCandidatePaths(
+  runtimeDirectory: string,
+  manifest: LibMpvRuntimeManifest | null,
+  env: NodeJS.ProcessEnv
+): string[] {
+  const manifestAddonPath = getManifestRelativePath(manifest, 'presenterAddon')
+
+  return unique([
+    env[ENV_PRESENTER_ADDON_PATH],
+    manifestAddonPath ? resolveRuntimePath(runtimeDirectory, manifestAddonPath) : null,
+    join(runtimeDirectory, 'addon', EMPV_NATIVE_PRESENTER_ADDON_NAME),
+    join(runtimeDirectory, 'native', EMPV_NATIVE_PRESENTER_ADDON_NAME),
+    join(runtimeDirectory, EMPV_NATIVE_PRESENTER_ADDON_NAME)
+  ])
+}
+
 function getLibraryCandidatePaths(
   runtimeDirectory: string,
   platform: LibMpvRuntimePlatform,
@@ -367,6 +391,7 @@ export async function resolveLibMpvRuntime(
   let manifestPath: string | null = null
   let manifest: LibMpvRuntimeManifest | null = null
   let addonPath: string | null = null
+  let presenterAddonPath: string | null = null
   let libraryPath: string | null = null
   let includeDirectory: string | null = null
 
@@ -376,6 +401,10 @@ export async function resolveLibMpvRuntime(
     manifestPath = getManifestFilePath(runtimeDirectory)
     manifest = await readRuntimeManifest(manifestPath)
     addonPath = firstExistingPath(getAddonCandidatePaths(runtimeDirectory, manifest, env))
+    presenterAddonPath =
+      platform === 'darwin'
+        ? firstExistingPath(getPresenterAddonCandidatePaths(runtimeDirectory, manifest, env))
+        : null
     libraryPath = firstExistingPath(
       getLibraryCandidatePaths(runtimeDirectory, platform, manifest, env)
     )
@@ -383,6 +412,10 @@ export async function resolveLibMpvRuntime(
 
     if (!addonPath) {
       missing.push('native-addon')
+    }
+
+    if (platform === 'darwin' && !presenterAddonPath) {
+      missing.push('native-presenter-addon')
     }
 
     if (!libraryPath) {
@@ -401,6 +434,7 @@ export async function resolveLibMpvRuntime(
     missing,
     platform,
     platformKey,
+    presenterAddonPath,
     runtimeDirectory
   }
 }

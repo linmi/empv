@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -10,11 +11,9 @@ use napi::bindgen_prelude::FnArgs;
 use napi::threadsafe_function::ThreadsafeFunction;
 
 #[cfg(target_os = "macos")]
-use super::macos::{MacPresenterState, MacRenderRuntime};
+use super::macos::MacRenderRuntime;
 use crate::mpv::handle::OwnedMpvHandle;
 use crate::playback::state::PlaybackStateReducer;
-#[cfg(target_os = "macos")]
-use crate::presentation::macos::VideoPresenter;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::presentation::wid::{VideoHost, VideoPresenter};
 
@@ -61,12 +60,12 @@ pub struct Session {
     pub last_snapshot_push_ms: AtomicI64,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub struct Presenter {
     pub host: VideoPresenter,
-    #[cfg(target_os = "macos")]
-    pub state: Mutex<MacPresenterState>,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 enum PresenterEntry<T> {
     Creating,
     Active(T),
@@ -75,6 +74,7 @@ enum PresenterEntry<T> {
 }
 
 static SESSIONS: OnceLock<Mutex<HashMap<String, Arc<Session>>>> = OnceLock::new();
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 static PRESENTERS: OnceLock<Mutex<HashMap<String, PresenterEntry<Arc<Presenter>>>>> =
     OnceLock::new();
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -84,6 +84,7 @@ fn sessions() -> &'static Mutex<HashMap<String, Arc<Session>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn presenters() -> &'static Mutex<HashMap<String, PresenterEntry<Arc<Presenter>>>> {
     PRESENTERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -144,6 +145,7 @@ pub fn remove_session(id: &str) -> Result<Option<Arc<Session>>, String> {
         .remove(id))
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn reserve_presenter_entry<T>(
     entries: &mut HashMap<String, PresenterEntry<T>>,
     id: String,
@@ -157,6 +159,7 @@ fn reserve_presenter_entry<T>(
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn commit_presenter_entry<T>(
     entries: &mut HashMap<String, PresenterEntry<T>>,
     id: &str,
@@ -176,6 +179,7 @@ fn commit_presenter_entry<T>(
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn cancel_presenter_reservation<T>(entries: &mut HashMap<String, PresenterEntry<T>>, id: &str) {
     if let Entry::Occupied(entry) = entries.entry(id.to_owned())
         && matches!(entry.get(), PresenterEntry::Creating)
@@ -184,6 +188,7 @@ fn cancel_presenter_reservation<T>(entries: &mut HashMap<String, PresenterEntry<
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn begin_presenter_destroy<T: Clone>(
     entries: &mut HashMap<String, PresenterEntry<T>>,
     id: &str,
@@ -211,6 +216,7 @@ fn begin_presenter_destroy<T: Clone>(
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn finish_presenter_destroy<T>(
     entries: &mut HashMap<String, PresenterEntry<T>>,
     id: &str,
@@ -229,6 +235,7 @@ fn finish_presenter_destroy<T>(
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn fail_presenter_destroy<T>(
     entries: &mut HashMap<String, PresenterEntry<T>>,
     id: &str,
@@ -250,11 +257,13 @@ fn fail_presenter_destroy<T>(
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub struct PresenterReservation {
     id: String,
     committed: bool,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl PresenterReservation {
     pub fn commit(mut self, presenter: Arc<Presenter>) -> Result<(), String> {
         let mut presenters = presenters()
@@ -266,6 +275,7 @@ impl PresenterReservation {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl Drop for PresenterReservation {
     fn drop(&mut self) {
         if self.committed {
@@ -277,6 +287,7 @@ impl Drop for PresenterReservation {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub fn reserve_presenter(id: String) -> Result<PresenterReservation, String> {
     if id.trim().is_empty() {
         return Err("Embedded MPV presenter id must not be empty.".to_owned());
@@ -291,22 +302,7 @@ pub fn reserve_presenter(id: String) -> Result<PresenterReservation, String> {
     })
 }
 
-#[cfg(target_os = "macos")]
-pub fn find_presenter(id: &str) -> Result<Option<Arc<Presenter>>, String> {
-    let presenters = presenters()
-        .lock()
-        .map_err(|_| "Embedded MPV presenter registry lock was poisoned.".to_owned())?;
-    Ok(match presenters.get(id) {
-        Some(PresenterEntry::Active(presenter)) => Some(presenter.clone()),
-        Some(
-            PresenterEntry::Creating
-            | PresenterEntry::Destroying(_)
-            | PresenterEntry::DestroyFailed(_),
-        )
-        | None => None,
-    })
-}
-
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub fn get_presenter(id: &str) -> Result<Arc<Presenter>, String> {
     let presenters = presenters()
         .lock()
@@ -326,12 +322,14 @@ pub fn get_presenter(id: &str) -> Result<Arc<Presenter>, String> {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub struct PresenterDestroyReservation {
     id: String,
     presenter: Arc<Presenter>,
     completed: bool,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl PresenterDestroyReservation {
     pub fn presenter(&self) -> &Presenter {
         &self.presenter
@@ -356,6 +354,7 @@ impl PresenterDestroyReservation {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl Drop for PresenterDestroyReservation {
     fn drop(&mut self) {
         if self.completed {
@@ -367,6 +366,7 @@ impl Drop for PresenterDestroyReservation {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub fn begin_presenter_destruction(
     id: &str,
 ) -> Result<Option<PresenterDestroyReservation>, String> {
@@ -383,7 +383,7 @@ pub fn begin_presenter_destruction(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
 mod tests {
     use super::{
         PresenterEntry, begin_presenter_destroy, cancel_presenter_reservation,
