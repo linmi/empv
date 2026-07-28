@@ -38,8 +38,22 @@ function log(message) {
   process.stdout.write(`[electron-runtime-playback-smoke] ${message}\n`)
 }
 
-function errorText(error) {
-  return error instanceof Error ? (error.stack ?? error.message) : String(error)
+function errorText(error, seen = new Set()) {
+  if (!(error instanceof Error)) return String(error)
+  if (seen.has(error)) return '[circular error cause]'
+  seen.add(error)
+
+  const detail = error.stack ?? error.message
+  const nested = []
+  if (error instanceof AggregateError) {
+    error.errors.forEach((child, index) => {
+      nested.push(`Aggregate error ${String(index + 1)}:\n${errorText(child, seen)}`)
+    })
+  }
+  if (error.cause !== undefined) {
+    nested.push(`Cause:\n${errorText(error.cause, seen)}`)
+  }
+  return nested.length === 0 ? detail : `${detail}\n${nested.join('\n')}`
 }
 
 function assertFile(filePath, description) {

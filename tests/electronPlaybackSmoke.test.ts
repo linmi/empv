@@ -49,6 +49,8 @@ describe('integrated Electron playback smoke', () => {
     assert.match(smoke, /await loadSource\(restarted, secondFixturePath/)
     assert.match(smoke, /await disposePlaybackSession\(restarted\)/)
     assert.match(smoke, /assert\.deepEqual\(diagnostics, \[\]\)/)
+    assert.match(smoke, /error instanceof AggregateError/)
+    assert.match(smoke, /Aggregate error/)
     assert.match(workflow, /Run crash-isolated Electron playback smoke/)
     assert.match(workflow, /Run crash-isolated Electron playback smoke under Xvfb/)
     assert.match(
