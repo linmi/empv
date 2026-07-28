@@ -40,6 +40,10 @@ describe('integrated Electron playback smoke', () => {
     assert.match(smoke, /assert\.deepEqual\(diagnostics, \[\]\)/)
     assert.match(workflow, /Run crash-isolated Electron playback smoke/)
     assert.match(workflow, /Run crash-isolated Electron playback smoke under Xvfb/)
+    assert.match(
+      workflow,
+      /pnpm exec electron --no-sandbox\s+\\\s+scripts\/electron-runtime-playback-smoke\.mjs/
+    )
     assert.match(readme, /Native session ids are generation-scoped and may repeat after/)
     assert.doesNotMatch(readme, /bindSessionToPresenter\(sessionId, sessionId\)/)
   })

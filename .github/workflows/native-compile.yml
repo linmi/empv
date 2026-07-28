@@ -563,7 +563,15 @@ jobs:
       # Electron supplies the real parent X11 window that the earlier Node-only
       # smoke could not create, so adoptVideoWindow and presenter teardown are
       # now runtime-verified rather than compile-only.
+      #
+      # GitHub's hosted Linux image does not install Electron's downloaded
+      # chrome-sandbox as root:4755, so Chromium aborts before the app entry
+      # runs unless this CI-only launch disables that renderer sandbox. The
+      # utility process remains a separate OS process, which is the isolation
+      # boundary this smoke kills and verifies.
       - name: Run crash-isolated Electron playback smoke under Xvfb
         run: |
+          pnpm run build
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
-            pnpm run smoke:electron-playback
+            pnpm exec electron --no-sandbox \
+            scripts/electron-runtime-playback-smoke.mjs
