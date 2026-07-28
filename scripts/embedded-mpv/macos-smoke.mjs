@@ -174,15 +174,25 @@ async function waitForSnapshot(addon, sessionId, description, budgetMs, predicat
   )
 }
 
-async function waitForFrame(frameState) {
+async function waitForPlaybackFrame(frameState) {
   const deadline = Date.now() + FRAME_BUDGET_MS
   while (Date.now() < deadline) {
-    if (frameState.count >= 1) {
+    if (
+      frameState.count >= 1 &&
+      Number.isFinite(frameState.contentGeneration) &&
+      frameState.contentGeneration > 0
+    ) {
       return
     }
     await sleep(POLL_INTERVAL_MS)
   }
-  fail(`onFrame did not fire within ${FRAME_BUDGET_MS}ms after rendering was enabled.`)
+  fail(
+    `onFrame did not publish a playback frame with a positive content generation within ` +
+      `${FRAME_BUDGET_MS}ms. Last frame: count=${frameState.count}, ` +
+      `surfaceIndex=${String(frameState.surfaceIndex)}, ` +
+      `poolGeneration=${String(frameState.poolGeneration)}, ` +
+      `contentGeneration=${String(frameState.contentGeneration)}.`
+  )
 }
 
 async function main() {
@@ -274,7 +284,7 @@ async function main() {
     log(`playback advanced to ${playingSnapshot.positionSeconds}s OK`)
     log(`(${snapshotEvents} snapshot notifications observed)`)
 
-    await waitForFrame(frameState)
+    await waitForPlaybackFrame(frameState)
     assert.ok(
       Number.isInteger(frameState.surfaceIndex) && frameState.surfaceIndex >= 0,
       `onFrame surfaceIndex must be a non-negative integer, got ${String(frameState.surfaceIndex)}`
