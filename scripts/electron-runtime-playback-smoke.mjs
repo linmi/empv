@@ -13,6 +13,7 @@ import {
   createEmpvPlaybackHost,
   createEmpvRuntimeClient
 } from '../dist/electron/index.js'
+import { loadEmbeddedLibMpvAddon } from '../dist/index.js'
 
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux', 'win32'])
 const OPERATION_TIMEOUT_MS = 20_000
@@ -337,7 +338,19 @@ async function run() {
     stdioPrefix: '[empv-integrated-smoke-runtime]',
     onDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
   })
-  host = await createEmpvPlaybackHost({ client, frameLinkServiceName })
+  host = await createEmpvPlaybackHost({
+    client,
+    frameLinkServiceName,
+    onWarmUpFailed: (error) => {
+      log(`playback utility warm-up failed: ${errorText(error)}`)
+    },
+    loadAddon: async () => {
+      log('playback utility warm-up settled; loading presenter addon in Electron main')
+      const loaded = await loadEmbeddedLibMpvAddon()
+      log('presenter addon loaded in Electron main')
+      return loaded
+    }
+  })
 
   const first = await createPlaybackSession(
     'empv-smoke-presenter-1',

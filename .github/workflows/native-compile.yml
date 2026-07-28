@@ -316,6 +316,7 @@ jobs:
       # loss, generation restart/id reuse, source replacement and final cleanup.
       # Pixel composition remains the interactive hardware gate's responsibility.
       - name: Run crash-isolated Electron playback smoke
+        timeout-minutes: 3
         run: pnpm run smoke:electron-playback
 
   # ───────────────────────────────────────────────────────────────────────────

@@ -39,7 +39,9 @@ describe('integrated Electron playback smoke', () => {
     assert.doesNotMatch(nodeRuntimeFork, /ELECTRON_RUN_AS_NODE: ['"]1['"]/)
     assert.doesNotMatch(nodeRuntimeFork, /RTLD_DEEPBIND/)
     assert.match(smoke, /createEmpvRuntimeClient\(\{/)
-    assert.match(smoke, /createEmpvPlaybackHost\(\{ client, frameLinkServiceName \}\)/)
+    assert.match(smoke, /playback utility warm-up settled; loading presenter addon/)
+    assert.match(smoke, /presenter addon loaded in Electron main/)
+    assert.match(smoke, /loadAddon: async \(\) =>/)
     assert.match(smoke, /const first = await createPlaybackSession\(/)
     assert.match(smoke, /const second = await createPlaybackSession\(/)
     assert.match(smoke, /await disposePlaybackSession\(first\)/)
@@ -63,7 +65,7 @@ describe('integrated Electron playback smoke', () => {
     )
     assert.match(
       workflow,
-      /Stage the pinned runtime beside empv\.node[\s\S]*Run crash-isolated Electron playback smoke\s+run: pnpm run smoke:electron-playback/
+      /Stage the pinned runtime beside empv\.node[\s\S]*Run crash-isolated Electron playback smoke\s+timeout-minutes: 3\s+run: pnpm run smoke:electron-playback/
     )
     assert.match(
       workflow,
