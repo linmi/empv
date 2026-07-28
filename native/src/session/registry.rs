@@ -239,6 +239,7 @@ pub fn reserve_presenter(id: String) -> Result<PresenterReservation, String> {
     })
 }
 
+#[cfg(target_os = "macos")]
 pub fn find_presenter(id: &str) -> Result<Option<Arc<Presenter>>, String> {
     let presenters = presenters()
         .lock()
