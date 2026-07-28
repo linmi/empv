@@ -23,10 +23,12 @@ export type FakeAddonOverrides = {
     onSnapshotChanged: () => void,
     onFrame: (surfaceIndex: number, poolGeneration: number, contentGeneration: number) => void
   ) => Promise<string>
+  disposeSession?: (sessionId: string) => Promise<void>
   seek?: (sessionId: string, seconds: number) => void
   getSessionSnapshot?: (sessionId: string) => LibMpvSessionSnapshot | null
   getVideoWindowHandle?: (sessionId: string) => number | null
   presentSurface?: () => void
+  destroyPresenter?: (presenterId: string) => void
 }
 
 const IDLE_SNAPSHOT: LibMpvSessionSnapshot = {
@@ -83,13 +85,14 @@ function makeCore(calls: AddonCall[], overrides: FakeAddonOverrides) {
     },
     disposeSession: async (sessionId: string): Promise<void> => {
       calls.push({ method: 'disposeSession', args: [sessionId] })
+      await overrides.disposeSession?.(sessionId)
     },
     loadPlayback: (sessionId: string, playback: LibMpvPlayback): void => {
       calls.push({ method: 'loadPlayback', args: [sessionId, playback] })
     },
     getSessionSnapshot: (sessionId: string): LibMpvSessionSnapshot | null => {
       calls.push({ method: 'getSessionSnapshot', args: [sessionId] })
-      return overrides.getSessionSnapshot?.(sessionId) ?? IDLE_SNAPSHOT
+      return overrides.getSessionSnapshot ? overrides.getSessionSnapshot(sessionId) : IDLE_SNAPSHOT
     },
     captureFrame: (sessionId: string): LibMpvCapturedFrame | null => {
       calls.push({ method: 'captureFrame', args: [sessionId] })
@@ -140,7 +143,10 @@ function makeCore(calls: AddonCall[], overrides: FakeAddonOverrides) {
       return RENDER_SIZE
     },
     setPresenterSuspended: note('setPresenterSuspended'),
-    destroyPresenter: note('destroyPresenter'),
+    destroyPresenter: (presenterId: string): void => {
+      calls.push({ method: 'destroyPresenter', args: [presenterId] })
+      overrides.destroyPresenter?.(presenterId)
+    },
     setWindowBackdrop: note('setWindowBackdrop')
   }
 }
@@ -183,7 +189,7 @@ export function makeWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'
     getPresentationKind: () => 'window',
     getVideoWindowHandle: (sessionId: string): number | null => {
       calls.push({ method: 'getVideoWindowHandle', args: [sessionId] })
-      return overrides.getVideoWindowHandle?.(sessionId) ?? 4242
+      return overrides.getVideoWindowHandle ? overrides.getVideoWindowHandle(sessionId) : 4242
     },
     adoptVideoWindow: note('adoptVideoWindow')
   }

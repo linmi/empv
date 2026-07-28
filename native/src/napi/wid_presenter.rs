@@ -4,7 +4,7 @@ use napi::bindgen_prelude::Buffer;
 use napi::{Error, Result};
 use napi_derive::napi;
 
-use crate::presentation::wid::{RenderSize, VideoPresenter};
+use crate::presentation::wid::VideoPresenter;
 use crate::session::registry::{self, Presenter};
 
 use super::dto::{JsAttachOptions, JsBounds, JsRenderSize, ZOrder, parse_z_order};
@@ -50,32 +50,27 @@ pub fn create_presenter(
                 .to_owned(),
         ));
     }
+    let reservation = registry::reserve_presenter(presenter_id.clone()).map_err(error)?;
     let host = VideoPresenter::create().map_err(error)?;
     let size = match host.configure(parent, options.bounds()) {
         Ok(size) => size,
         Err(reason) => {
-            let _ = host.close();
-            return Err(error(reason));
+            return match host.close() {
+                Ok(()) => Err(error(reason)),
+                Err(cleanup_reason) => Err(error(format!(
+                    "Failed to configure the native video presenter: {reason} Presenter rollback also failed: {cleanup_reason}"
+                ))),
+            };
         }
     };
     let presenter = Arc::new(Presenter { host });
-    if let Some(previous) =
-        registry::insert_presenter(presenter_id.clone(), presenter).map_err(error)?
-        && let Err(reason) = previous.host.close()
-    {
-        if !previous.host.is_released() {
-            let _ = registry::insert_presenter(presenter_id, previous).map_err(error)?;
-        }
-        return Err(error(reason));
-    }
+    reservation.commit(presenter).map_err(error)?;
     Ok(size.into())
 }
 
 #[napi(js_name = "adoptVideoWindow")]
 pub fn adopt_video_window(presenter_id: String, child_window_handle: i64) -> Result<()> {
-    let Some(presenter) = registry::find_presenter(&presenter_id).map_err(error)? else {
-        return Ok(());
-    };
+    let presenter = registry::get_presenter(&presenter_id).map_err(error)?;
     presenter
         .host
         .adopt_child(child_window_handle as usize)
@@ -83,9 +78,7 @@ pub fn adopt_video_window(presenter_id: String, child_window_handle: i64) -> Res
 }
 
 pub fn set_presenter_bounds(presenter_id: String, bounds: JsBounds) -> Result<JsRenderSize> {
-    let Some(presenter) = registry::find_presenter(&presenter_id).map_err(error)? else {
-        return Ok(RenderSize::default().into());
-    };
+    let presenter = registry::get_presenter(&presenter_id).map_err(error)?;
     presenter
         .host
         .set_bounds(bounds.into())
@@ -94,9 +87,7 @@ pub fn set_presenter_bounds(presenter_id: String, bounds: JsBounds) -> Result<Js
 }
 
 pub fn refresh_presenter_scale(presenter_id: String) -> Result<JsRenderSize> {
-    let Some(presenter) = registry::find_presenter(&presenter_id).map_err(error)? else {
-        return Ok(RenderSize::default().into());
-    };
+    let presenter = registry::get_presenter(&presenter_id).map_err(error)?;
     presenter
         .host
         .refresh_scale()
@@ -105,9 +96,7 @@ pub fn refresh_presenter_scale(presenter_id: String) -> Result<JsRenderSize> {
 }
 
 pub fn set_presenter_suspended(presenter_id: String, suspended: bool) -> Result<()> {
-    let Some(presenter) = registry::find_presenter(&presenter_id).map_err(error)? else {
-        return Ok(());
-    };
+    let presenter = registry::get_presenter(&presenter_id).map_err(error)?;
     presenter.host.set_suspended(suspended).map_err(error)
 }
 
@@ -115,13 +104,7 @@ pub fn destroy_presenter(presenter_id: String) -> Result<()> {
     let Some(presenter) = registry::remove_presenter(&presenter_id).map_err(error)? else {
         return Ok(());
     };
-    if let Err(reason) = presenter.host.close() {
-        if !presenter.host.is_released() {
-            let _ = registry::insert_presenter(presenter_id, presenter).map_err(error)?;
-        }
-        return Err(error(reason));
-    }
-    Ok(())
+    presenter.host.close().map_err(error)
 }
 
 pub fn set_window_backdrop(_window_handle: Buffer, _color: Option<String>) -> Result<()> {

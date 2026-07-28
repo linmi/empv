@@ -170,12 +170,22 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
+    port.deliver({ id: 8, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
     port.deliver({ id: 9, method: 'seek', args: ['session-1', 12] })
     await sleep(20)
 
     assert.deepEqual(
       port.posted.filter((message) => message.id === 9),
-      [{ id: 9, type: 'error', message: 'seek is out of range', name: 'RangeError' }]
+      [
+        {
+          id: 9,
+          type: 'error',
+          message: 'seek is out of range',
+          name: 'RangeError',
+          recoverability: 'request'
+        }
+      ]
     )
   })
 
@@ -194,6 +204,8 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
+    port.deliver({ id: 20, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
     port.deliver({
       id: 21,
       method: 'setVideoAdjustments',
@@ -271,6 +283,16 @@ describe('startEmpvRuntimeProcess', () => {
       (layerReply.result as { videoWindowHandle: number | null }).videoWindowHandle,
       null
     )
+    assert.deepEqual(
+      layerPort
+        .postedOfType('runtime.heartbeat')
+        .map((message) => message.sessions)
+        .filter((sessions) => Array.isArray(sessions) && sessions.length > 0),
+      [
+        [{ sessionId: 'session-1', state: 'creating' }],
+        [{ sessionId: 'session-1', state: 'active' }]
+      ]
+    )
 
     const windowPort = makeFakeParentPort()
     const windowBackend = makeWindowAddon()
@@ -289,6 +311,290 @@ describe('startEmpvRuntimeProcess', () => {
       (windowReply.result as { videoWindowHandle: number | null }).videoWindowHandle,
       4242
     )
+  })
+
+  test('rolls back a window session that has no adoptable native handle', async () => {
+    const port = makeFakeParentPort()
+    const { loaded, calls } = makeWindowAddon({
+      getVideoWindowHandle: () => null
+    })
+
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 30, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+
+    const [reply] = port.posted.filter((message) => message.id === 30)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.recoverability, 'request')
+    assert.match(String(reply?.message), /did not expose the video window handle/)
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'disposeSession'),
+      [{ method: 'disposeSession', args: ['session-1'] }]
+    )
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [])
+  })
+
+  test('rolls back native creation when the public create result cannot be assembled', async () => {
+    const port = makeFakeParentPort()
+    setFrameLinkServiceName('test.frame.link')
+    const { loaded, calls } = makeLayerAddon({
+      getSessionSnapshot: () => {
+        throw new Error('snapshot lock poisoned')
+      }
+    })
+
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 31, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'disposeSession'),
+      [{ method: 'disposeSession', args: ['session-1'] }]
+    )
+    const [reply] = port.posted.filter((message) => message.id === 31)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.recoverability, 'request')
+    assert.match(String(reply?.message), /native session was rolled back: snapshot lock poisoned/)
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [])
+  })
+
+  test('makes a failed create rollback generation-fatal with both causes', async () => {
+    const port = makeFakeParentPort()
+    setFrameLinkServiceName('test.frame.link')
+    const exitCodes: number[] = []
+    const { loaded } = makeLayerAddon({
+      getSessionSnapshot: () => {
+        throw new Error('snapshot read failed')
+      },
+      disposeSession: async () => {
+        throw new Error('rollback teardown failed')
+      }
+    })
+
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded,
+        exitProcess: (code) => exitCodes.push(code)
+      })
+    )
+    port.deliver({ id: 32, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+
+    const [reply] = port.posted.filter((message) => message.id === 32)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.name, 'EmpvRuntimeGenerationFailure')
+    assert.equal(reply?.recoverability, 'generation')
+    assert.match(String(reply?.message), /snapshot read failed/)
+    assert.match(String(reply?.message), /rollback teardown failed/)
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [])
+    assert.deepEqual(exitCodes, [1])
+  })
+
+  test('keeps disposal visible, rejects concurrent session commands, then removes the session', async () => {
+    const port = makeFakeParentPort()
+    setFrameLinkServiceName('test.frame.link')
+    const disposeGate = makeGate()
+    const { loaded, calls } = makeLayerAddon({
+      disposeSession: async () => disposeGate.wait
+    })
+
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 40, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({ id: 41, method: 'disposeSession', args: ['session-1'] })
+    await sleep(20)
+
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
+      { sessionId: 'session-1', state: 'disposing' }
+    ])
+    port.deliver({ id: 42, method: 'setVolume', args: ['session-1', 0.5] })
+    await sleep(20)
+    const [concurrentReply] = port.posted.filter((message) => message.id === 42)
+    assert.equal(concurrentReply?.type, 'error')
+    assert.equal(concurrentReply?.recoverability, 'request')
+    assert.match(String(concurrentReply?.message), /session session-1 is disposing, not active/)
+    assert.equal(
+      calls.filter((call) => call.method === 'setVolume').length,
+      0,
+      'A disposing native session must never receive another command.'
+    )
+    port.deliver({ id: 43, method: 'disposeSession', args: ['session-1'] })
+    await sleep(20)
+    const [duplicateDisposeReply] = port.posted.filter((message) => message.id === 43)
+    assert.equal(duplicateDisposeReply?.type, 'error')
+    assert.equal(duplicateDisposeReply?.recoverability, 'request')
+    assert.match(
+      String(duplicateDisposeReply?.message),
+      /session session-1 is disposing, not active/
+    )
+    assert.equal(
+      calls.filter((call) => call.method === 'disposeSession').length,
+      1,
+      'Concurrent disposal must not run native teardown twice.'
+    )
+
+    disposeGate.open()
+    await sleep(20)
+    assert.deepEqual(
+      port.posted.filter((message) => message.id === 41),
+      [{ id: 41, type: 'done', result: undefined }]
+    )
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [])
+  })
+
+  test('drops late native callbacks once disposal begins', async () => {
+    const port = makeFakeParentPort()
+    setFrameLinkServiceName('test.frame.link')
+    const disposeGate = makeGate()
+    let publishSnapshot = (): void => {}
+    let publishFrame = (): void => {}
+    const { loaded } = makeLayerAddon({
+      createSession: async (_options, onSnapshotChanged, onFrame) => {
+        publishSnapshot = onSnapshotChanged
+        publishFrame = () => onFrame(1, 2, 3)
+        return 'session-1'
+      },
+      disposeSession: async () => disposeGate.wait
+    })
+
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 80, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({ id: 81, method: 'disposeSession', args: ['session-1'] })
+    await sleep(20)
+    publishSnapshot()
+    publishFrame()
+
+    assert.deepEqual(port.postedOfType('session.snapshot'), [])
+    assert.deepEqual(port.postedOfType('session.frame'), [])
+    disposeGate.open()
+    await sleep(20)
+  })
+
+  test('isolates a disposing session from another active session', async () => {
+    const port = makeFakeParentPort()
+    setFrameLinkServiceName('test.frame.link')
+    const disposeGate = makeGate()
+    let nextSession = 1
+    const { loaded, calls } = makeLayerAddon({
+      createSession: async () => `session-${nextSession++}`,
+      disposeSession: async () => disposeGate.wait
+    })
+
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 70, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({ id: 71, method: 'createSession', args: [{ options: { volume: 0.5 } }] })
+    await sleep(20)
+    port.deliver({ id: 72, method: 'disposeSession', args: ['session-1'] })
+    await sleep(20)
+    port.deliver({ id: 73, method: 'setVolume', args: ['session-2', 0.25] })
+    await sleep(20)
+
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
+      { sessionId: 'session-1', state: 'disposing' },
+      { sessionId: 'session-2', state: 'active' }
+    ])
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'setVolume'),
+      [{ method: 'setVolume', args: ['session-2', 0.25] }]
+    )
+    assert.deepEqual(
+      port.posted.filter((message) => message.id === 73),
+      [{ id: 73, type: 'done', result: undefined }]
+    )
+
+    disposeGate.open()
+    await sleep(20)
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
+      { sessionId: 'session-2', state: 'active' }
+    ])
+  })
+
+  test('treats native disposal failure as a generation ownership failure', async () => {
+    const port = makeFakeParentPort()
+    setFrameLinkServiceName('test.frame.link')
+    const exitCodes: number[] = []
+    const { loaded } = makeLayerAddon({
+      disposeSession: async () => {
+        throw new Error('event loop would not stop')
+      }
+    })
+
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded,
+        exitProcess: (code) => exitCodes.push(code)
+      })
+    )
+    port.deliver({ id: 50, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({ id: 51, method: 'disposeSession', args: ['session-1'] })
+    await sleep(20)
+
+    const [reply] = port.posted.filter((message) => message.id === 51)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.recoverability, 'generation')
+    assert.match(String(reply?.message), /session session-1/)
+    assert.match(String(reply?.message), /event loop would not stop/)
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [])
+    assert.deepEqual(exitCodes, [1])
+  })
+
+  test('rejects disposal of a session that this generation does not own', async () => {
+    const port = makeFakeParentPort()
+    setFrameLinkServiceName('test.frame.link')
+    const { loaded, calls } = makeLayerAddon()
+
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 60, method: 'disposeSession', args: ['missing-session'] })
+    await sleep(20)
+
+    const [reply] = port.posted.filter((message) => message.id === 60)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.recoverability, 'request')
+    assert.match(String(reply?.message), /session missing-session does not exist/)
+    assert.equal(calls.filter((call) => call.method === 'disposeSession').length, 0)
   })
 
   test('routes snapshot and frame notifications to the parent port', async () => {

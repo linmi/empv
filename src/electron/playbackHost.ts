@@ -59,15 +59,20 @@ type EmpvPlaybackHostCore = {
   // bound its frames are dropped: there is nowhere to put them, and presenting
   // onto a stale presenter is worse than showing nothing.
   bindSessionToPresenter(sessionId: string, presenterId: string): void
-  unbindSession(sessionId: string): void
   // --- Presenter API, main process only ---
   // createPresenter lives on each facet, not here: the backends take different
   // attach options and an intersection cannot narrow what the core declares.
   setPresenterBounds(presenterId: string, bounds: LibMpvVideoLayerBounds): LibMpvRenderSize
   refreshPresenterScale(presenterId: string): LibMpvRenderSize
   setPresenterSuspended(presenterId: string, suspended: boolean): void
+  // Removes the frame binding before native destruction, so a late frame can
+  // never target a presenter whose teardown has begun.
   destroyPresenter(presenterId: string): void
   setWindowBackdrop(windowHandle: Buffer, color: string | null): void
+  // Final host teardown. Destroys every owned presenter, removes the frame
+  // listener and (on layer) stops the mach receiver. Cleanup is exhaustive:
+  // every step runs and all failures are reported together.
+  dispose(): void
 }
 
 // The two facets stay disjoint here exactly as they are on the addon: a caller
@@ -140,46 +145,155 @@ export async function createEmpvPlaybackHost(
   // The mach frame-link receiver only exists on 'layer'. 'window'
   // reparents an OS video window instead -- no link, no presentSurface. A failed
   // registration throws here rather than leaving frames with nowhere to land.
-  if (loaded.presentationKind === 'layer') {
-    loaded.addon.startPresenterLink(frameLinkServiceName)
+  const presenterIds = new Set<string>()
+  const presenterBySession = new Map<string, string>()
+  const sessionByPresenter = new Map<string, string>()
+  let disposed = false
+  let removeFrameListener = (): void => {}
+
+  function assertOpen(operation: string): void {
+    if (disposed) {
+      throw new Error(`Cannot ${operation}: the empv playback host is disposed.`)
+    }
   }
 
-  const presenterBySession = new Map<string, string>()
+  function createTrackedPresenter(
+    presenterId: string,
+    create: () => LibMpvRenderSize
+  ): LibMpvRenderSize {
+    assertOpen('create a presenter')
+    if (presenterIds.has(presenterId)) {
+      throw new Error(`Cannot create duplicate empv presenter ${presenterId}.`)
+    }
+
+    const renderSize = create()
+    presenterIds.add(presenterId)
+    return renderSize
+  }
+
+  function requirePresenter(presenterId: string, operation: string): void {
+    if (!presenterIds.has(presenterId)) {
+      throw new Error(`Cannot ${operation}: empv presenter ${presenterId} does not exist.`)
+    }
+  }
 
   if (loaded.presentationKind === 'layer') {
     const machAddon = loaded.addon
-    client.onFrame((event) => {
-      const presenterId = presenterBySession.get(event.sessionId)
-      if (presenterId === undefined) return
+    machAddon.startPresenterLink(frameLinkServiceName)
+    try {
+      removeFrameListener = client.onFrame((event) => {
+        const presenterId = presenterBySession.get(event.sessionId)
+        if (presenterId === undefined) return
 
+        try {
+          machAddon.presentSurface(
+            presenterId,
+            event.poolGeneration,
+            event.surfaceIndex,
+            event.contentGeneration
+          )
+        } catch (error) {
+          options.onPresentFailed?.(error, event.sessionId)
+        }
+      })
+    } catch (error) {
       try {
-        machAddon.presentSurface(
-          presenterId,
-          event.poolGeneration,
-          event.surfaceIndex,
-          event.contentGeneration
+        machAddon.stopPresenterLink()
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Failed to subscribe the empv frame listener and stop the presenter link during rollback.'
         )
-      } catch (error) {
-        options.onPresentFailed?.(error, event.sessionId)
       }
-    })
+      throw error
+    }
   }
 
   const core: EmpvPlaybackHostCore = {
     client,
     frameLinkServiceName,
     bindSessionToPresenter(sessionId, presenterId) {
+      assertOpen('bind a session to a presenter')
+      requirePresenter(presenterId, 'bind a session')
+      const boundPresenter = presenterBySession.get(sessionId)
+      if (boundPresenter !== undefined) {
+        throw new Error(
+          `Cannot bind empv session ${sessionId} to presenter ${presenterId}: it is already bound to presenter ${boundPresenter}.`
+        )
+      }
+      const boundSession = sessionByPresenter.get(presenterId)
+      if (boundSession !== undefined) {
+        throw new Error(
+          `Cannot bind empv presenter ${presenterId} to session ${sessionId}: it is already bound to session ${boundSession}.`
+        )
+      }
       presenterBySession.set(sessionId, presenterId)
+      sessionByPresenter.set(presenterId, sessionId)
     },
-    unbindSession(sessionId) {
-      presenterBySession.delete(sessionId)
+    setPresenterBounds(presenterId, bounds) {
+      assertOpen('set presenter bounds')
+      requirePresenter(presenterId, 'set presenter bounds')
+      return addon.setPresenterBounds(presenterId, bounds)
     },
-    setPresenterBounds: (presenterId, bounds) => addon.setPresenterBounds(presenterId, bounds),
-    refreshPresenterScale: (presenterId) => addon.refreshPresenterScale(presenterId),
-    setPresenterSuspended: (presenterId, suspended) =>
-      addon.setPresenterSuspended(presenterId, suspended),
-    destroyPresenter: (presenterId) => addon.destroyPresenter(presenterId),
-    setWindowBackdrop: (windowHandle, color) => addon.setWindowBackdrop(windowHandle, color)
+    refreshPresenterScale(presenterId) {
+      assertOpen('refresh presenter scale')
+      requirePresenter(presenterId, 'refresh presenter scale')
+      return addon.refreshPresenterScale(presenterId)
+    },
+    setPresenterSuspended(presenterId, suspended) {
+      assertOpen('set presenter suspension')
+      requirePresenter(presenterId, 'set presenter suspension')
+      addon.setPresenterSuspended(presenterId, suspended)
+    },
+    destroyPresenter(presenterId) {
+      assertOpen('destroy a presenter')
+      requirePresenter(presenterId, 'destroy a presenter')
+      presenterIds.delete(presenterId)
+      const sessionId = sessionByPresenter.get(presenterId)
+      if (sessionId !== undefined) {
+        sessionByPresenter.delete(presenterId)
+        presenterBySession.delete(sessionId)
+      }
+      addon.destroyPresenter(presenterId)
+    },
+    setWindowBackdrop(windowHandle, color) {
+      assertOpen('set a window backdrop')
+      addon.setWindowBackdrop(windowHandle, color)
+    },
+    dispose() {
+      assertOpen('dispose the playback host')
+      disposed = true
+
+      const failures: unknown[] = []
+      presenterBySession.clear()
+      sessionByPresenter.clear()
+      const ownedPresenterIds = [...presenterIds]
+      presenterIds.clear()
+
+      for (const presenterId of ownedPresenterIds) {
+        try {
+          addon.destroyPresenter(presenterId)
+        } catch (error) {
+          failures.push(error)
+        }
+      }
+      try {
+        removeFrameListener()
+      } catch (error) {
+        failures.push(error)
+      }
+      if (loaded.presentationKind === 'layer') {
+        try {
+          loaded.addon.stopPresenterLink()
+        } catch (error) {
+          failures.push(error)
+        }
+      }
+
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Failed to dispose the empv playback host completely.')
+      }
+    }
   }
 
   if (loaded.presentationKind === 'layer') {
@@ -188,10 +302,17 @@ export async function createEmpvPlaybackHost(
       ...core,
       presentationKind: 'layer',
       createPresenter: (presenterId, windowHandle, attachOptions) =>
-        machAddon.createPresenter(presenterId, windowHandle, attachOptions),
-      observeWindowOcclusion: (windowHandle, onChange) =>
-        machAddon.observeWindowOcclusion(windowHandle, onChange),
-      unobserveWindowOcclusion: (windowHandle) => machAddon.unobserveWindowOcclusion(windowHandle)
+        createTrackedPresenter(presenterId, () =>
+          machAddon.createPresenter(presenterId, windowHandle, attachOptions)
+        ),
+      observeWindowOcclusion: (windowHandle, onChange) => {
+        assertOpen('observe window occlusion')
+        machAddon.observeWindowOcclusion(windowHandle, onChange)
+      },
+      unobserveWindowOcclusion: (windowHandle) => {
+        assertOpen('stop observing window occlusion')
+        machAddon.unobserveWindowOcclusion(windowHandle)
+      }
     }
   }
 
@@ -200,8 +321,13 @@ export async function createEmpvPlaybackHost(
     ...core,
     presentationKind: 'window',
     createPresenter: (presenterId, windowHandle, attachOptions) =>
-      widAddon.createPresenter(presenterId, windowHandle, attachOptions),
-    adoptVideoWindow: (presenterId, childWindowHandle) =>
+      createTrackedPresenter(presenterId, () =>
+        widAddon.createPresenter(presenterId, windowHandle, attachOptions)
+      ),
+    adoptVideoWindow: (presenterId, childWindowHandle) => {
+      assertOpen('adopt a video window')
+      requirePresenter(presenterId, 'adopt a video window')
       widAddon.adoptVideoWindow(presenterId, childWindowHandle)
+    }
   }
 }

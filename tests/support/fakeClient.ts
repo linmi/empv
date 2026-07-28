@@ -10,7 +10,10 @@ export type FakeRuntimeClient = {
 }
 
 export function makeFakeRuntimeClient(
-  overrides: { invoke?: (method: string, args: unknown[]) => unknown } = {}
+  overrides: {
+    invoke?: (method: string, args: unknown[]) => unknown
+    onFrame?: (listener: (event: EmpvRuntimeFrameEvent) => void) => () => void
+  } = {}
 ): FakeRuntimeClient {
   const invocations: { method: string; args: unknown[] }[] = []
   const terminated: string[] = []
@@ -25,6 +28,9 @@ export function makeFakeRuntimeClient(
       return () => {}
     },
     onFrame(listener) {
+      if (overrides.onFrame) {
+        return overrides.onFrame(listener)
+      }
       frameListeners.add(listener)
       return () => {
         frameListeners.delete(listener)
@@ -36,7 +42,7 @@ export function makeFakeRuntimeClient(
     getProcessId() {
       return 1234
     },
-    getActiveSessionIds() {
+    getSessionStates() {
       return []
     },
     terminate(reason) {

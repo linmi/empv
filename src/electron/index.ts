@@ -4,10 +4,13 @@
 // must never pull this module in.
 export {
   createEmpvRuntimeClient,
+  EmpvRuntimeProcessFailure,
   type EmpvRuntimeClient,
+  type EmpvRuntimeClientDiagnostic,
   type EmpvRuntimeClientOptions,
   type EmpvRuntimeFrameEvent,
-  type EmpvRuntimeSnapshotEvent
+  type EmpvRuntimeSnapshotEvent,
+  type EmpvRuntimeTerminalReason
 } from './client.ts'
 
 export {
@@ -32,5 +35,7 @@ export {
   type EmpvRuntimeRequest,
   type EmpvRuntimeResponse,
   type EmpvRuntimeSessionCreateInput,
-  type EmpvRuntimeSessionCreateResult
+  type EmpvRuntimeSessionCreateResult,
+  type EmpvRuntimeSessionLifecycle,
+  type EmpvRuntimeSessionState
 } from './protocol.ts'

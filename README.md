@@ -186,6 +186,8 @@ startEmpvRuntimeProcess()
 The main process drives it through a typed client and a playback host:
 
 ```ts
+import { randomUUID } from 'node:crypto'
+
 import {
   createEmpvFrameLinkServiceName,
   createEmpvPlaybackHost,
@@ -200,28 +202,57 @@ const client = createEmpvRuntimeClient({
   resolveEntryPath: () => join(app.getAppPath(), 'out/main/playbackRuntime.js'),
   frameLinkServiceName,
   serviceName: 'Playback Runtime',
-  onHeartbeat: () => watchdog.heartbeat()
+  requestTimeoutMs: 30_000,
+  onHeartbeat: () => watchdog.heartbeat(),
+  onDiagnostic: (diagnostic) => logger.warn(diagnostic.type, diagnostic)
 })
 
 // Loads the addon in this process for the presenter, registers the frame link,
 // and presents every bound session's frames. Build it when you first need a
 // presenter -- session control does not require it.
 const host = await createEmpvPlaybackHost({ client, frameLinkServiceName })
+const presenterByRuntimeSession = new Map<string, string>()
+
+client.onExit((error, sessions) => {
+  // A utility exit is terminal for every session in that generation. Remove
+  // each main-process presenter/binding and invalidate any renderer-facing id;
+  // a later invoke starts a new generation, not a recovered session. Iterate
+  // owned state, not `sessions`: that argument is the last heartbeat snapshot
+  // for diagnostics and may predate a just-created session.
+  const cleanupFailures: unknown[] = []
+  for (const [runtimeSessionId, presenterId] of presenterByRuntimeSession) {
+    try {
+      host.destroyPresenter(presenterId)
+    } catch (cleanupError) {
+      cleanupFailures.push(cleanupError)
+    }
+    presenterByRuntimeSession.delete(runtimeSessionId)
+  }
+  diagnoseLostGeneration(error, sessions)
+  if (cleanupFailures.length) {
+    logger.error(
+      new AggregateError(cleanupFailures, 'Failed to tear down every lost empv presenter.')
+    )
+  }
+})
 
 const { sessionId, videoWindowHandle } = await client.invoke('createSession', {
   options: { volume: 1 }
 })
+// Native session ids are scoped to one utility generation and may be reused
+// after a crash. Give the main-process presenter its own lifetime-unique id.
+const presenterId = `empv-presenter-${randomUUID()}`
 
 // Branch before creating the presenter. The two backends take different attach
 // options -- only 'layer' can composite beneath the web contents -- so on the
 // union nothing backend-specific is callable.
 const renderSize =
   host.presentationKind === 'layer'
-    ? host.createPresenter(sessionId, window.getNativeWindowHandle(), {
+    ? host.createPresenter(presenterId, window.getNativeWindowHandle(), {
         ...bounds,
         zOrder: 'underlay'
       })
-    : host.createPresenter(sessionId, window.getNativeWindowHandle(), {
+    : host.createPresenter(presenterId, window.getNativeWindowHandle(), {
         ...bounds,
         zOrder: 'overlay'
       })
@@ -229,22 +260,24 @@ const renderSize =
 // 'window' renders into an OS child window the utility owns; the presenter has
 // to adopt it before anything appears.
 if (host.presentationKind === 'window' && videoWindowHandle !== null) {
-  host.adoptVideoWindow(sessionId, videoWindowHandle)
+  host.adoptVideoWindow(presenterId, videoWindowHandle)
 }
 
-host.bindSessionToPresenter(sessionId, sessionId)
+host.bindSessionToPresenter(sessionId, presenterId)
+presenterByRuntimeSession.set(sessionId, presenterId)
 
 await client.invoke('setRenderSize', sessionId, renderSize.widthPixels, renderSize.heightPixels)
 await client.invoke('loadPlayback', sessionId, { streamUrl: '/path/to/video.mkv' })
 await client.invoke('setPaused', sessionId, false)
 
 client.onSnapshot(({ snapshot }) => render(snapshot))
-client.onExit((error, activeSessionIds) => recover(error, activeSessionIds))
 ```
 
 Frames never appear in your code: the host turns each one into the right
 `presentSurface` call for whichever presenter the session is bound to, and drops
-frames for sessions that are not bound. Unbind before destroying a presenter.
+frames for sessions that are not bound. `destroyPresenter` removes that binding
+before native teardown begins; `dispose` tears down every remaining presenter,
+the frame listener, and the macOS frame link.
 
 `zOrder: 'underlay'` exists only on `layer`. The `window` backend reparents an OS
 child window, which always composites above the web contents its parent draws, so
@@ -262,7 +295,35 @@ deliberately does **not** own a liveness watchdog: it reports heartbeats through
 that already supervises several utility processes keeps one watchdog policy
 instead of inheriting a second one from a library. `terminate` is one call
 because the ordering matters -- in-flight requests have to fail before the
-process dies, or callers hang until the exit event lands.
+process dies, or callers hang until the exit event lands. It is synchronous,
+idempotent, and uses Electron's `UtilityProcess.kill()`; a failed kill and a
+consumer callback/listener that throws are surfaced through `onDiagnostic`
+instead of escaping an Electron event callback.
+
+Each spawned process is an isolated generation. A fatal error or explicit
+termination closes that generation to new requests immediately, rejects every
+in-flight request once, and remains the primary `EmpvRuntimeProcessFailure`
+reason reported by `onExit`; the final process exit code is attached separately.
+Messages and exits from a stopped generation cannot settle requests belonging to
+a later respawn.
+
+Heartbeats and `onExit` expose the utility's last observed session lifecycle
+snapshot (`creating`, `active`, or `disposing`) for diagnostics. It is not a
+recovery inventory: every session belongs to exactly one utility generation,
+and an exited generation's native sessions are gone rather than adoptable by a
+respawned process. Native session ids are generation-scoped and may repeat after
+respawn, so do not expose them as application-lifetime or renderer-lifetime
+identities. Use a separate main-process-lifetime id for presenters and public
+session handles, remove the presenter binding on `onExit`, and reject commands
+for the lost public handle.
+
+`requestTimeoutMs` is required because a utility can keep heartbeating while an
+async native request never settles. The deadline starts when `invoke` is called,
+including time spent waiting for the process to spawn. A timeout records the
+request id, method and session id (when present), rejects every request in that
+generation, and terminates the process. Mutating requests are never retried:
+after their completion becomes unknown, the whole generation is treated as
+untrustworthy.
 
 `empv/electron` needs `electron` as a peer. It is built and verified against
 Electron 42; earlier versions with a stable `utilityProcess` API are likely fine

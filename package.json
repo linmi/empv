@@ -100,6 +100,8 @@
     "benchmark:macos": "node --experimental-strip-types scripts/embedded-mpv/macos-benchmark.mjs",
     "probe:windows-window-tree": "pwsh -File scripts/embedded-mpv/windows-window-tree.ps1",
     "smoke:windows": "node --experimental-strip-types scripts/embedded-mpv/windows-smoke.mjs",
+    "smoke:electron-client": "pnpm run build && electron scripts/electron-runtime-client-smoke.mjs",
+    "smoke:electron-playback": "pnpm run build && electron scripts/electron-runtime-playback-smoke.mjs",
     "typecheck": "pnpm run build && tsc --noEmit -p tsconfig.test.json",
     "test:node": "node --experimental-strip-types --test tests/*.test.ts",
     "fmt": "cargo fmt --manifest-path native/Cargo.toml -- --check",

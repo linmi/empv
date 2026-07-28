@@ -338,10 +338,6 @@ impl VideoPresenter {
         Ok(())
     }
 
-    pub fn is_released(&self) -> bool {
-        self.raw.load(Ordering::Acquire) == 0
-    }
-
     fn pointer(&self) -> WidResult<*mut c_void> {
         let pointer = self.raw.load(Ordering::Acquire);
         if pointer == 0 {

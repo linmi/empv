@@ -19,9 +19,9 @@ name: native compile gate
 #   * runtime-patches：verify:runtime-patches 的 dry-run 门禁——下载 pinned mpv
 #     源码，patch --forward --dry-run 校验 vendored patch，并断言 meson 选项 +
 #     构建脚本 flag 的不变量。不编译、不 meson/ninja、不建窗口。
-#   * 仍不覆盖：Wayland；macOS 的 CALayer presenter 与 BrowserWindow 合成（smoke
-#     只跑会话侧，不建 presenter）。Electron BrowserWindow presenter 重投与
-#     Windows 原生显示器像素验证归消费方的 interactive workflow。
+#   * 仍不覆盖：Wayland；macOS / Windows 的真实显示器像素合成。托管 macOS 与
+#     Xvfb Linux 会运行 crash-isolated Electron BrowserWindow 生命周期门禁；
+#     presenter 的逐像素合成与 Windows 子窗口仍由消费方 interactive workflow 验证。
 #
 # 为什么直接驱动 napi build，而不是 pnpm build:native：
 #   scripts/build-native.cjs 的 resolveRuntime() 只认 vendor/
@@ -327,7 +327,13 @@ jobs:
           library_dir="${brew_prefix}/lib"
           test -e "${library_dir}/libmpv.dylib" -o -e "${library_dir}/libmpv.2.dylib" \
             || { echo "missing libmpv in ${library_dir}"; exit 1; }
+          if test -e "${library_dir}/libmpv.dylib"; then
+            library_path="${library_dir}/libmpv.dylib"
+          else
+            library_path="${library_dir}/libmpv.2.dylib"
+          fi
           echo "LIBMPV_LIBRARY_DIR=${library_dir}" >> "$GITHUB_ENV"
+          echo "EMPV_LIBRARY_PATH=${library_path}" >> "$GITHUB_ENV"
           echo "resolved libmpv lib=${library_dir}"
 
       # macOS 专属的 cfg 代码（session/macos.rs 的渲染 worker 与帧代次测试）只有在
@@ -336,6 +342,9 @@ jobs:
         run: |
           pnpm run lint
           pnpm run test
+
+      - name: Verify Electron utility request timeout and respawn
+        run: pnpm run smoke:electron-client
 
       - name: Compile embedded mpv addon (Rust + clang)
         run: |
@@ -368,6 +377,11 @@ jobs:
       # 在 runner 的用户会话里就够。BrowserWindow 合成归消费方的交互式门禁。
       - name: Run the macOS runtime smoke
         run: node --experimental-strip-types scripts/embedded-mpv/macos-smoke.mjs
+
+      # Main + utility 两个真实 Electron 进程：双 session、单 session teardown 隔离、
+      # utility SIGKILL、generation respawn/raw id 复用、连续换源和最终 presenter 清理。
+      - name: Run crash-isolated Electron playback smoke
+        run: pnpm run smoke:electron-playback
 
       # --invariants-only：托管 macOS runner 没有可加速的 OpenGL 像素格式，CGL 回退到
       # 软件渲染器（mpv 自己会报 "Suspected software renderer or indirect context"），
@@ -439,12 +453,11 @@ jobs:
   # 在 xvfb-run 提供的真实 X 显示下真正加载 .node、mpv_create、建窗口并驱动一段
   # 真实播放，断言 'window' 会话契约（断言清单见 linux-smoke.mjs）。
   #
-  # 只跑 session 半边（mpv 初始化 + 自建 override-redirect 未挂载视频窗口 + 播放）。
-  # presenter 半边（createPresenter/adoptVideoWindow 把视频窗口 reparent 进宿主
-  # 窗口）需要一个真实父 X 窗口 id，而 Node 无轻量 X11 绑定可在不引入重型原生依赖
-  # 的前提下造出父窗口，故 presenter reparent 保持**运行时未验证**（仅编译验证）。
-  # Windows 运行时冒烟本轮**不做**：hosted runner 的 window-station / desktop
-  # 交互是另一个独立课题。
+  # Node-only smoke 跑 session 半边（mpv 初始化 + 自建 override-redirect 未挂载视频窗口
+  # + 播放）；随后 Electron smoke 用 BrowserWindow 提供真实父 X 窗口，覆盖
+  # createPresenter/adoptVideoWindow、双 session、utility SIGKILL/respawn 与 teardown。
+  # Windows 运行时由登录桌面的 interactive workflow 覆盖：hosted runner 的
+  # window-station / desktop 交互语义不同，不能冒充用户会话。
   #
   # first-run 风险（本 job 无法本地复现，首个 CI run 即为验证）：
   #   * apt 包名：libmpv-dev（同时带入运行时 libmpv.so.2，与编译端同源；即便发行版
@@ -471,12 +484,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 运行 .node 只需 Node（N-API ABI 稳定，node 22 与编译端一致即可加载）。
-      # 冒烟脚本纯 Node builtin，不需要 pnpm / node_modules，故此 job 不做 install。
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      # crash-isolated gate uses the package's Electron peer in a real main +
+      # utility process pair. This standalone package repo has no committed
+      # lockfile, matching the macOS job's install policy.
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
 
       # libmpv-dev 带入运行时 libmpv.so.2（与 linux 编译端同源）；xvfb 提供 X 显示；
       # ffmpeg 生成 fixture；libgl1-mesa-dri 提供软件 GL。libx11-6 / libxext6 已随
@@ -506,6 +526,17 @@ jobs:
           node_file="${GITHUB_WORKSPACE}/native/build/Release/empv.node"
           test -f "$node_file" || { echo "missing $node_file"; exit 1; }
           ls -la "$node_file"
+          library_dir="$(pkg-config --variable=libdir mpv)"
+          library_path=""
+          for candidate in libmpv.so libmpv.so.2 libmpv.so.1; do
+            if test -e "${library_dir}/${candidate}"; then
+              library_path="${library_dir}/${candidate}"
+              break
+            fi
+          done
+          test -n "${library_path}" -a -e "${library_path}" \
+            || { echo "missing libmpv runtime in ${library_dir}"; exit 1; }
+          echo "EMPV_LIBRARY_PATH=${library_path}" >> "$GITHUB_ENV"
 
       # 用 ffmpeg 现场生成极小测试视频（testsrc，5s，320x180），不把二进制 fixture
       # 提交进仓库。刻意**只含视频、无音轨**：headless runner 无音频设备，避免 AO
@@ -528,3 +559,11 @@ jobs:
             node --experimental-strip-types \
             scripts/embedded-mpv/linux-smoke.mjs \
             "${RUNNER_TEMP}/linux-smoke-fixture.mp4"
+
+      # Electron supplies the real parent X11 window that the earlier Node-only
+      # smoke could not create, so adoptVideoWindow and presenter teardown are
+      # now runtime-verified rather than compile-only.
+      - name: Run crash-isolated Electron playback smoke under Xvfb
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            pnpm run smoke:electron-playback

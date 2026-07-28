@@ -99,6 +99,26 @@ describe('createEmpvPlaybackHost', () => {
     assert.equal(host.presentationKind, 'layer')
   })
 
+  test('stops a newly-started layer link when frame subscription fails', async () => {
+    const { loaded, calls } = makeLayerAddon()
+    const fakeClient = makeFakeRuntimeClient({
+      onFrame: () => {
+        throw new Error('frame subscription failed')
+      }
+    })
+
+    await assert.rejects(
+      createEmpvPlaybackHost({
+        client: fakeClient.client,
+        frameLinkServiceName: createEmpvFrameLinkServiceName(),
+        loadAddon: async () => loaded
+      }),
+      /frame subscription failed/
+    )
+    assert.equal(calls.filter((call) => call.method === 'startPresenterLink').length, 1)
+    assert.equal(calls.filter((call) => call.method === 'stopPresenterLink').length, 1)
+  })
+
   test('presents a bound session frame with the arguments the presenter expects', async () => {
     const fakeClient = makeFakeRuntimeClient()
     const { loaded, calls } = makeLayerAddon()
@@ -163,7 +183,7 @@ describe('createEmpvPlaybackHost', () => {
     )
   })
 
-  test('stops presenting once a session is unbound', async () => {
+  test('stops presenting before a presenter is destroyed', async () => {
     const fakeClient = makeFakeRuntimeClient()
     const { loaded, calls } = makeLayerAddon()
 
@@ -173,6 +193,16 @@ describe('createEmpvPlaybackHost', () => {
       loadAddon: async () => loaded
     })
 
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    host.createPresenter('presenter-1', WINDOW_HANDLE, {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay'
+    })
     host.bindSessionToPresenter('session-1', 'presenter-1')
     fakeClient.emitFrame({
       sessionId: 'session-1',
@@ -180,7 +210,7 @@ describe('createEmpvPlaybackHost', () => {
       poolGeneration: 1,
       contentGeneration: 1
     })
-    host.unbindSession('session-1')
+    host.destroyPresenter('presenter-1')
     fakeClient.emitFrame({
       sessionId: 'session-1',
       surfaceIndex: 1,
@@ -209,6 +239,16 @@ describe('createEmpvPlaybackHost', () => {
       onPresentFailed: (_error, sessionId) => failures.push(sessionId)
     })
 
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    host.createPresenter('presenter-1', WINDOW_HANDLE, {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay'
+    })
     host.bindSessionToPresenter('session-1', 'presenter-1')
     fakeClient.emitFrame({
       sessionId: 'session-1',
@@ -218,6 +258,196 @@ describe('createEmpvPlaybackHost', () => {
     })
 
     assert.deepEqual(failures, ['session-1'])
+  })
+
+  test('rejects duplicate presenters and non-existent bindings before reaching native code', async () => {
+    const fakeClient = makeFakeRuntimeClient()
+    const { loaded, calls } = makeLayerAddon()
+    const host = await createEmpvPlaybackHost({
+      client: fakeClient.client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName(),
+      loadAddon: async () => loaded
+    })
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    const options = {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay' as const
+    }
+
+    assert.throws(
+      () => host.bindSessionToPresenter('session-1', 'missing-presenter'),
+      /presenter missing-presenter does not exist/
+    )
+    host.createPresenter('presenter-1', WINDOW_HANDLE, options)
+    assert.throws(
+      () => host.createPresenter('presenter-1', WINDOW_HANDLE, options),
+      /duplicate empv presenter presenter-1/
+    )
+    assert.equal(
+      calls.filter((call) => call.method === 'createPresenter').length,
+      1,
+      'A duplicate id must not replace or close the native presenter already owned by the host.'
+    )
+  })
+
+  test('enforces one-to-one session and presenter bindings', async () => {
+    const { loaded } = makeLayerAddon()
+    const host = await createEmpvPlaybackHost({
+      client: makeFakeRuntimeClient().client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName(),
+      loadAddon: async () => loaded
+    })
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    const options = {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay' as const
+    }
+    host.createPresenter('presenter-1', WINDOW_HANDLE, options)
+    host.createPresenter('presenter-2', WINDOW_HANDLE, options)
+    host.bindSessionToPresenter('session-1', 'presenter-1')
+
+    assert.throws(
+      () => host.bindSessionToPresenter('session-1', 'presenter-2'),
+      /session session-1.*already bound to presenter presenter-1/
+    )
+    assert.throws(
+      () => host.bindSessionToPresenter('session-2', 'presenter-1'),
+      /presenter presenter-1.*already bound to session session-1/
+    )
+  })
+
+  test('removes frame routing before native presenter destruction starts', async () => {
+    const fakeClient = makeFakeRuntimeClient()
+    const { loaded, calls } = makeLayerAddon({
+      destroyPresenter: () => {
+        fakeClient.emitFrame({
+          sessionId: 'session-1',
+          surfaceIndex: 0,
+          poolGeneration: 1,
+          contentGeneration: 1
+        })
+      }
+    })
+    const host = await createEmpvPlaybackHost({
+      client: fakeClient.client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName(),
+      loadAddon: async () => loaded
+    })
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    host.createPresenter('presenter-1', WINDOW_HANDLE, {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay'
+    })
+    host.bindSessionToPresenter('session-1', 'presenter-1')
+    host.destroyPresenter('presenter-1')
+
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'presentSurface'),
+      [],
+      'A frame arriving during native destroy must already be disconnected.'
+    )
+  })
+
+  test('disposes every presenter, the frame listener and the layer link exactly once', async () => {
+    const fakeClient = makeFakeRuntimeClient()
+    const { loaded, calls } = makeLayerAddon()
+    const host = await createEmpvPlaybackHost({
+      client: fakeClient.client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName(),
+      loadAddon: async () => loaded
+    })
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    const options = {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay' as const
+    }
+    host.createPresenter('presenter-1', WINDOW_HANDLE, options)
+    host.createPresenter('presenter-2', WINDOW_HANDLE, options)
+    host.bindSessionToPresenter('session-1', 'presenter-1')
+
+    host.dispose()
+    fakeClient.emitFrame({
+      sessionId: 'session-1',
+      surfaceIndex: 0,
+      poolGeneration: 1,
+      contentGeneration: 1
+    })
+
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'destroyPresenter'),
+      [
+        { method: 'destroyPresenter', args: ['presenter-1'] },
+        { method: 'destroyPresenter', args: ['presenter-2'] }
+      ]
+    )
+    assert.equal(calls.filter((call) => call.method === 'stopPresenterLink').length, 1)
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'presentSurface'),
+      []
+    )
+    assert.throws(() => host.dispose(), /playback host is disposed/)
+    assert.throws(
+      () => host.setPresenterBounds('presenter-1', options),
+      /playback host is disposed/
+    )
+  })
+
+  test('continues host disposal after presenter cleanup failures and reports them together', async () => {
+    const { loaded, calls } = makeLayerAddon({
+      destroyPresenter: (presenterId) => {
+        throw new Error(`cannot close ${presenterId}`)
+      }
+    })
+    const host = await createEmpvPlaybackHost({
+      client: makeFakeRuntimeClient().client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName(),
+      loadAddon: async () => loaded
+    })
+    if (host.presentationKind !== 'layer') {
+      throw new Error(`expected the layer host, got ${host.presentationKind}`)
+    }
+    const options = {
+      height: 180,
+      width: 320,
+      x: 0,
+      y: 0,
+      zOrder: 'underlay' as const
+    }
+    host.createPresenter('presenter-1', WINDOW_HANDLE, options)
+    host.createPresenter('presenter-2', WINDOW_HANDLE, options)
+
+    assert.throws(
+      () => host.dispose(),
+      (error: unknown) => {
+        assert.ok(error instanceof AggregateError)
+        assert.equal(error.errors.length, 2)
+        assert.match(String(error.errors[0]), /cannot close presenter-1/)
+        assert.match(String(error.errors[1]), /cannot close presenter-2/)
+        return true
+      }
+    )
+    assert.equal(calls.filter((call) => call.method === 'destroyPresenter').length, 2)
+    assert.equal(calls.filter((call) => call.method === 'stopPresenterLink').length, 1)
   })
 
   test('exposes only the presenter facet its backend actually has', async () => {

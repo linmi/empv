@@ -331,26 +331,18 @@ pub fn create_presenter(
     let window = window_handle(&window_handle_buffer)?;
     let bounds = options.macos_bounds();
     let overlay = parse_z_order(&options.z_order).map_err(napi_error)? == ZOrder::Overlay;
+    let reservation = registry::reserve_presenter(presenter_id.clone()).map_err(napi_error)?;
     let (host, size) = VideoPresenter::create(window, overlay, bounds).map_err(napi_error)?;
     let presenter = Arc::new(Presenter {
         host,
         state: Mutex::new(MacPresenterState::new(bounds)),
     });
-    if let Some(previous) =
-        registry::insert_presenter(presenter_id, presenter).map_err(napi_error)?
-    {
-        previous.host.close().map_err(napi_error)?;
-    }
+    reservation.commit(presenter).map_err(napi_error)?;
     Ok(size.into())
 }
 
 pub fn set_presenter_bounds(presenter_id: String, bounds: JsBounds) -> Result<JsRenderSize> {
-    let Some(presenter) = registry::find_presenter(&presenter_id).map_err(napi_error)? else {
-        return Ok(JsRenderSize {
-            width_pixels: 0,
-            height_pixels: 0,
-        });
-    };
+    let presenter = registry::get_presenter(&presenter_id).map_err(napi_error)?;
     let bounds = Bounds {
         x: bounds.x,
         y: bounds.y,
@@ -368,12 +360,7 @@ pub fn set_presenter_bounds(presenter_id: String, bounds: JsBounds) -> Result<Js
 }
 
 pub fn refresh_presenter_scale(presenter_id: String) -> Result<JsRenderSize> {
-    let Some(presenter) = registry::find_presenter(&presenter_id).map_err(napi_error)? else {
-        return Ok(JsRenderSize {
-            width_pixels: 0,
-            height_pixels: 0,
-        });
-    };
+    let presenter = registry::get_presenter(&presenter_id).map_err(napi_error)?;
     let bounds = presenter
         .state
         .lock()
@@ -387,9 +374,7 @@ pub fn refresh_presenter_scale(presenter_id: String) -> Result<JsRenderSize> {
 }
 
 pub fn set_presenter_suspended(presenter_id: String, suspended: bool) -> Result<()> {
-    let Some(presenter) = registry::find_presenter(&presenter_id).map_err(napi_error)? else {
-        return Ok(());
-    };
+    let presenter = registry::get_presenter(&presenter_id).map_err(napi_error)?;
     presenter
         .state
         .lock()

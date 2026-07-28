@@ -39,12 +39,27 @@ export type EmpvRuntimeSessionCreateInput = {
 
 export type EmpvRuntimeSessionCreateResult = {
   sessionId: string
-  snapshot: LibMpvSessionSnapshot | null
+  // A newly-created session is registered natively. A null snapshot would mean
+  // the utility and native registries already disagree, so creation rolls back
+  // instead of publishing such a result.
+  snapshot: LibMpvSessionSnapshot
   // 'window' backends render into an OS video window the utility owns; its
   // native handle is shipped here so the main-process presenter can reparent it
   // (adoptVideoWindow). null on 'layer', where frames cross the mach
   // frame link instead and there is no window to adopt.
   videoWindowHandle: number | null
+}
+
+// The utility is the authority for a native session's lifecycle within one
+// process generation. "creating" begins once native creation returns an id but
+// before the utility has assembled the public create result. "disposing"
+// begins before native teardown starts and remains visible until teardown
+// settles. A removed session never appears in this snapshot.
+export type EmpvRuntimeSessionLifecycle = 'creating' | 'active' | 'disposing'
+
+export type EmpvRuntimeSessionState = {
+  sessionId: string
+  state: EmpvRuntimeSessionLifecycle
 }
 
 // The presenter half of the addon runs in the main process against a real
@@ -137,7 +152,7 @@ export type EmpvRuntimeResult<Method extends EmpvRuntimeMethod> = Method extends
   : Method extends 'createSession'
     ? EmpvRuntimeSessionCreateResult
     : Method extends 'loadPlayback'
-      ? LibMpvSessionSnapshot | null
+      ? LibMpvSessionSnapshot
       : Method extends 'disposeSession'
         ? void
         : Method extends 'captureFrame'
@@ -151,14 +166,23 @@ export type EmpvRuntimeRequest<Method extends EmpvRuntimeMethod = EmpvRuntimeMet
 
 export type EmpvRuntimeResponse =
   | { id: number; type: 'done'; result: unknown }
-  | { id: number; type: 'error'; message: string; name: string }
+  | {
+      id: number
+      type: 'error'
+      message: string
+      name: string
+      // A request failure leaves the generation usable. A generation failure
+      // means native resource ownership can no longer be proven, so the client
+      // rejects every pending request and terminates that generation.
+      recoverability: 'request' | 'generation'
+    }
 
 export type EmpvRuntimeEvent =
   | {
       type: 'runtime.heartbeat'
       pid: number
       sentAt: number
-      activeSessionIds: string[]
+      sessions: EmpvRuntimeSessionState[]
     }
   | {
       type: 'session.snapshot'
