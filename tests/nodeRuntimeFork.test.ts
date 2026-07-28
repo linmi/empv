@@ -2,7 +2,10 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
-import { forkEmpvNodeRuntimeProcess } from '../src/electron/nodeRuntimeFork.ts'
+import {
+  forkEmpvNodeRuntimeProcess,
+  resolveEmpvNodeExecutablePath
+} from '../src/electron/nodeRuntimeFork.ts'
 import type { EmpvRuntimeRequest } from '../src/electron/protocol.ts'
 
 const ECHO_ENTRY = fileURLToPath(new URL('./fixtures/nodeRuntimeEcho.mjs', import.meta.url))
@@ -40,8 +43,9 @@ test('the Node runtime fork preserves IPC values and owns an explicit process bo
   const reply = await Promise.race([response, fatal])
   assert.deepEqual(reply, {
     bytes: Buffer.from([1, 2, 3]),
+    execPath: process.execPath,
     message: payload,
-    runAsNode: '1'
+    runAsNode: null
   })
   assert.ok(typeof reply === 'object' && reply !== null)
   assert.ok(
@@ -60,4 +64,21 @@ test('the Node runtime fork preserves IPC values and owns an explicit process bo
   const exit = await exited
   assert.equal(exit.code, null)
   assert.equal(exit.signal, 'SIGTERM')
+})
+
+test('the Linux Node executable is explicit, absolute, present, and executable', () => {
+  assert.equal(
+    resolveEmpvNodeExecutablePath(() => process.execPath),
+    process.execPath
+  )
+  assert.throws(
+    () => resolveEmpvNodeExecutablePath(undefined),
+    /requires resolveLinuxNodeExecutablePath/
+  )
+  assert.throws(() => resolveEmpvNodeExecutablePath(() => 'node'), /path must be absolute/)
+  assert.throws(
+    () => resolveEmpvNodeExecutablePath(() => '/definitely/missing/empv-node'),
+    /does not exist/
+  )
+  assert.throws(() => resolveEmpvNodeExecutablePath(() => ECHO_ENTRY), /is not executable/)
 })

@@ -105,6 +105,11 @@ export type EmpvRuntimeClientOptions = {
   // terminates that whole runtime generation instead of retrying the request or
   // allowing later calls to observe a potentially half-mutated native state.
   requestTimeoutMs: number
+  // Linux-only hard requirement for the public Electron client. The executable
+  // must be a separately packaged plain Node runtime, not Electron in
+  // ELECTRON_RUN_AS_NODE mode: Electron preloads Chromium's FFmpeg symbols
+  // before JavaScript starts, which can corrupt a distribution libmpv.
+  resolveLinuxNodeExecutablePath?: () => string
   resolveForkEnv?: () => NodeJS.ProcessEnv
   stdioPrefix?: string
   onSpawn?: () => void

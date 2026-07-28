@@ -15,6 +15,14 @@ function log(message) {
   process.stdout.write(`[electron-runtime-client-smoke] ${message}\n`)
 }
 
+function resolveLinuxNodeExecutablePath() {
+  const executablePath = process.env.EMPV_SMOKE_NODE_EXECUTABLE
+  if (!executablePath) {
+    throw new Error('Linux smoke requires EMPV_SMOKE_NODE_EXECUTABLE.')
+  }
+  return executablePath
+}
+
 function waitForNextExit(client) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -38,6 +46,8 @@ async function run() {
     frameLinkServiceName: `empv.runtime-client-smoke.${process.pid}`,
     serviceName: 'empv Runtime Client Smoke',
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    resolveLinuxNodeExecutablePath:
+      process.platform === 'linux' ? resolveLinuxNodeExecutablePath : undefined,
     onDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
   })
 

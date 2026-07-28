@@ -306,11 +306,20 @@ async function run() {
     process.env.EMPV_ADDON_PATH = path.resolve(process.env.EMPV_SMOKE_ADDON_PATH)
   }
   const frameLinkServiceName = createEmpvFrameLinkServiceName()
+  const resolveLinuxNodeExecutablePath = () => {
+    const executablePath = process.env.EMPV_SMOKE_NODE_EXECUTABLE
+    if (!executablePath) {
+      throw new Error('Linux smoke requires EMPV_SMOKE_NODE_EXECUTABLE.')
+    }
+    return executablePath
+  }
   client = createEmpvRuntimeClient({
     resolveEntryPath: () => runtimeEntry,
     frameLinkServiceName,
     serviceName: 'empv Integrated Playback Smoke',
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    resolveLinuxNodeExecutablePath:
+      process.platform === 'linux' ? resolveLinuxNodeExecutablePath : undefined,
     stdioPrefix: '[empv-integrated-smoke-runtime]',
     onDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
   })

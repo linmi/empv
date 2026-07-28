@@ -46,8 +46,9 @@ position/cache/dropped-frame churn is coalesced to at most one notification per
 - Cross-building the Windows runtime: MinGW-w64, meson, ninja, nasm, cmake
 - Linux: X11 or Xwayland. **Native Wayland is not supported** — empv fails loudly
   when `DISPLAY` is unset.
-- Packaged Linux apps must leave Electron's `RunAsNode` fuse enabled so the
-  isolated playback child can start without a system Node installation.
+- Packaged Linux apps must ship a plain Node executable as an independent app
+  resource and pass its absolute path to `resolveLinuxNodeExecutablePath`.
+  empv never searches `PATH` or falls back to Electron for this runtime.
 
 ## Install
 
@@ -175,9 +176,10 @@ Loading the addon straight into your main process means a native mpv crash takes
 the whole app down. `empv/electron` keeps the presenter in the main process and
 runs sessions in a separate **playback process**, so a crash costs you that
 runtime generation and nothing else. macOS and Windows use an Electron utility
-process. Linux uses the same Electron executable in `ELECTRON_RUN_AS_NODE` mode:
-Chromium utility processes preload their own FFmpeg build, whose global symbols
-are not ABI-compatible with a distribution's libmpv dependency chain.
+process. Linux uses a separately packaged plain Node executable: Chromium
+utility processes and Electron's `ELECTRON_RUN_AS_NODE` mode both preload
+Chromium's FFmpeg build, whose global symbols are not ABI-compatible with a
+distribution's libmpv dependency chain.
 
 Your runtime entry is two lines — your bundler still decides where it lands:
 
@@ -208,6 +210,12 @@ const client = createEmpvRuntimeClient({
   frameLinkServiceName,
   serviceName: 'Playback Runtime',
   requestTimeoutMs: 30_000,
+  // Linux only: an app-owned resource, never `node` from PATH and never the
+  // Electron executable. The resolver is not called on macOS or Windows.
+  resolveLinuxNodeExecutablePath:
+    process.platform === 'linux'
+      ? () => '/absolute/path/to/my-app-resources/node/bin/node'
+      : undefined,
   onHeartbeat: () => watchdog.heartbeat(),
   onDiagnostic: (diagnostic) => logger.warn(diagnostic.type, diagnostic)
 })
@@ -334,8 +342,9 @@ after their completion becomes unknown, the whole generation is treated as
 untrustworthy.
 
 `empv/electron` needs `electron` as a peer. It is built and verified against
-Electron 42. macOS and Windows require `utilityProcess`; Linux requires
-`ELECTRON_RUN_AS_NODE` support. Earlier Electron versions are not covered.
+Electron 42. macOS and Windows require `utilityProcess`; Linux requires an
+explicit, executable plain Node resource. Earlier Electron versions are not
+covered.
 
 ## Limitations
 

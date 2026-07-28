@@ -13,7 +13,7 @@ import {
   type EmpvRuntimeSnapshotEvent,
   type EmpvRuntimeTerminalReason
 } from './clientCore.ts'
-import { forkEmpvNodeRuntimeProcess } from './nodeRuntimeFork.ts'
+import { forkEmpvNodeRuntimeProcess, resolveEmpvNodeExecutablePath } from './nodeRuntimeFork.ts'
 
 export {
   EmpvRuntimeProcessFailure,
@@ -74,10 +74,20 @@ export function selectEmpvRuntimeProcessFork(
 }
 
 export function createEmpvRuntimeClient(options: EmpvRuntimeClientOptions): EmpvRuntimeClient {
+  const linuxNodeExecutablePath =
+    process.platform === 'linux'
+      ? resolveEmpvNodeExecutablePath(options.resolveLinuxNodeExecutablePath)
+      : null
+
   return createEmpvRuntimeClientWithFork(
     options,
     selectEmpvRuntimeProcessFork(process.platform, {
-      node: forkEmpvNodeRuntimeProcess,
+      node: (modulePath, args, forkOptions) => {
+        if (linuxNodeExecutablePath === null) {
+          throw new Error('The empv Linux Node process fork was selected on a non-Linux platform.')
+        }
+        return forkEmpvNodeRuntimeProcess(modulePath, args, forkOptions, linuxNodeExecutablePath)
+      },
       utility: forkEmpvUtilityRuntimeProcess
     })
   )

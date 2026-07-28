@@ -492,8 +492,11 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
+      - name: Record the isolated Node playback executable
+        run: echo "EMPV_SMOKE_NODE_EXECUTABLE=$(node -p 'process.execPath')" >> "$GITHUB_ENV"
+
       # crash-isolated gate uses the package's Electron peer in a real main +
-      # Linux Node-mode playback child pair. This standalone package repo has no committed
+      # Linux plain-Node playback child pair. This standalone package repo has no committed
       # lockfile, matching the macOS job's install policy.
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -567,8 +570,9 @@ jobs:
       # GitHub's hosted Linux image does not install Electron's downloaded
       # chrome-sandbox as root:4755, so Chromium aborts before the app entry
       # runs unless this CI-only launch disables that renderer sandbox. The
-      # playback child uses ELECTRON_RUN_AS_NODE and remains a separate OS
-      # process, which is the isolation boundary this smoke kills and verifies.
+      # playback child uses the separately resolved setup-node executable and
+      # remains a separate OS process, which is the isolation boundary this
+      # smoke kills and verifies.
       - name: Run crash-isolated Electron playback smoke under Xvfb
         run: |
           pnpm run build

@@ -1,4 +1,6 @@
 import { fork } from 'node:child_process'
+import { accessSync, constants, existsSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 
 import type { EmpvRuntimeChildProcess, EmpvRuntimeProcessForkOptions } from './clientCore.ts'
 
@@ -6,24 +8,56 @@ function errorReport(error: Error): string {
   return error.stack ?? error.message
 }
 
-// Linux must not host libmpv inside Electron's Chromium utility process:
+export function resolveEmpvNodeExecutablePath(resolvePath: (() => string) | undefined): string {
+  if (!resolvePath) {
+    throw new Error(
+      'empv on Linux requires resolveLinuxNodeExecutablePath to return an absolute path to a separately packaged plain Node executable.'
+    )
+  }
+
+  let executablePath: string
+  try {
+    executablePath = resolvePath()
+  } catch (error) {
+    throw new Error(
+      `Failed to resolve the empv Linux Node executable: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    )
+  }
+  if (!isAbsolute(executablePath)) {
+    throw new Error(
+      `The empv Linux Node executable path must be absolute; received ${JSON.stringify(executablePath)}.`
+    )
+  }
+  if (!existsSync(executablePath)) {
+    throw new Error(`The empv Linux Node executable does not exist at ${executablePath}.`)
+  }
+  try {
+    accessSync(executablePath, constants.X_OK)
+  } catch (error) {
+    throw new Error(`The empv Linux Node executable is not executable at ${executablePath}.`, {
+      cause: error
+    })
+  }
+  return executablePath
+}
+
+// Linux must not host libmpv inside Electron's Chromium utility process or
+// Electron's executable in ELECTRON_RUN_AS_NODE mode:
 // Chromium has already loaded its own FFmpeg build into the process-wide symbol
 // scope, and a distro libmpv can bind to that ABI-incompatible copy. Electron's
-// own executable in ELECTRON_RUN_AS_NODE mode starts a plain Node process
-// instead, preserving the packaged-app executable boundary without depending on
-// a system Node installation.
+// executable retains those symbols even in Node mode. A separately packaged
+// plain Node executable provides the required process and dynamic-linker
+// boundary without depending on a system installation or PATH lookup.
 export function forkEmpvNodeRuntimeProcess(
   modulePath: string,
   args: string[],
   options: EmpvRuntimeProcessForkOptions,
-  execPath: string = process.execPath
+  execPath: string
 ): EmpvRuntimeChildProcess {
   const child = fork(modulePath, args, {
     detached: false,
-    env: {
-      ...options.env,
-      ELECTRON_RUN_AS_NODE: '1'
-    },
+    env: options.env,
     execArgv: [],
     execPath,
     serialization: 'advanced',
