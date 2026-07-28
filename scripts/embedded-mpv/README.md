@@ -167,11 +167,16 @@ pnpm --filter empv smoke:windows
 The smoke creates real Win32 parent/child HWNDs without Electron. It validates
 the native presenter path.
 
-The BrowserWindow boundary is covered by an application-level smoke that lives
-in the consuming Electron app (it needs a real `BrowserWindow` and a native
-display capture binding, neither of which this package owns).
+The hosted Windows CI also runs `smoke:electron-playback`. It creates a real
+Electron `BrowserWindow`, starts playback in `utilityProcess`, creates two
+presenters and sessions, tears one down without disturbing the other, kills the
+utility, verifies that Electron and the window survive, starts a fresh
+generation, replaces the source, and checks final cleanup. This is the mandatory
+Windows runtime and lifecycle gate; it deliberately does not claim that video
+pixels were composited into the visible desktop.
 
-Such a smoke must run in a logged-in interactive Windows desktop. It attaches
+Pixel-composition validation must run in a logged-in interactive Windows
+desktop. It attaches
 the mpv child HWND to a real frameless BrowserWindow, moves the presenter,
 captures the primary display through the desktop's native capture binding, and
 samples it using the BrowserWindow's real screen coordinates and DPI scale. It
@@ -183,8 +188,8 @@ external child HWND. PNG captures and a JSON report are written to
 
 ### Interactive self-hosted runner
 
-`.github/workflows/libmpv-windows-interactive.yml` runs the native smoke once
-and the Electron smoke twice on the existing hardware-lab label set:
+`.github/workflows/libmpv-windows-interactive.yml` reruns the native smoke and
+the pixel-sampling Electron smoke twice on the existing hardware-lab label set:
 
 ```text
 self-hosted, capture-hardware, capture-windows-hardware

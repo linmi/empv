@@ -51,8 +51,19 @@ describe('integrated Electron playback smoke', () => {
     assert.match(smoke, /assert\.deepEqual\(diagnostics, \[\]\)/)
     assert.match(smoke, /error instanceof AggregateError/)
     assert.match(smoke, /Aggregate error/)
+    assert.match(workflow, /Stage the pinned runtime beside empv\.node/)
+    assert.match(workflow, /EMPV_SMOKE_ADDON_PATH=\$nodeFile/)
+    assert.match(workflow, /Run the Windows native runtime and presenter smoke/)
     assert.match(workflow, /Run crash-isolated Electron playback smoke/)
     assert.match(workflow, /Run crash-isolated Electron playback smoke under Xvfb/)
+    assert.match(
+      workflow,
+      /Run the Windows native runtime and presenter smoke\s+run: pnpm run smoke:windows/
+    )
+    assert.match(
+      workflow,
+      /Stage the pinned runtime beside empv\.node[\s\S]*Run crash-isolated Electron playback smoke\s+run: pnpm run smoke:electron-playback/
+    )
     assert.match(
       workflow,
       /pnpm exec electron --no-sandbox\s+\\\s+scripts\/electron-runtime-playback-smoke\.mjs/

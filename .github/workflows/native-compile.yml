@@ -9,19 +9,21 @@ name: native compile gate
 #   * macos：'layer' 后端的编译 + 运行时。单 job 完成编译与 smoke（IOSurface 池、
 #     mach 帧链、真实播放、RGBA 回读），因为两者用的是同一份 Homebrew libmpv。
 #   * linux / windows：覆盖「编译 + 链接」——cargo/napi 必须以 0 退出且真的产出
-#     build/Release/empv.node（每个 job 最后一步断言产物存在）。
+#     build/Release/empv.node（每个 job 都断言产物存在）。
+#   * windows：编译后把同一份 pinned compile/smoke DLL 放到 addon 旁，真实加载
+#     libmpv，驱动 Win32 parent/child HWND presenter、播放与 teardown；随后在 Electron
+#     BrowserWindow + utilityProcess 中覆盖双 session、utility 强杀、generation
+#     恢复、连续换源和最终清理。它不做屏幕像素采样。
 #   * linux-smoke：把 Linux 从「编译通过」升级为「运行时可跑」。它复用 linux job
 #     编出的 .node（经 upload/download-artifact 传递），在 xvfb-run 提供的真实 X
 #     显示下真正加载 .node、mpv_create、建窗口并驱动一段真实播放，断言
-#     'window' 会话契约（见该 job 内注释）。Windows 运行时由独立的
-#     libmpv-windows-interactive.yml 在登录桌面的自托管 runner 上覆盖，机器离线
-#     不影响本 hosted compile workflow 的结论。
+#     'window' 会话契约（见该 job 内注释）。
 #   * runtime-patches：verify:runtime-patches 的 dry-run 门禁——下载 pinned mpv
 #     源码，patch --forward --dry-run 校验 vendored patch，并断言 meson 选项 +
 #     构建脚本 flag 的不变量。不编译、不 meson/ninja、不建窗口。
-#   * 仍不覆盖：Wayland；macOS / Windows 的真实显示器像素合成。托管 macOS 与
-#     Xvfb Linux 会运行 crash-isolated Electron BrowserWindow 生命周期门禁；
-#     presenter 的逐像素合成与 Windows 子窗口仍由消费方 interactive workflow 验证。
+#   * 仍不覆盖：Wayland；macOS / Windows 的真实显示器像素合成。三平台都运行
+#     crash-isolated Electron BrowserWindow 生命周期门禁；Windows 子 HWND 的实际
+#     屏幕像素合成仍由登录桌面的 interactive workflow 验证。
 #
 # 为什么直接驱动 napi build，而不是 pnpm build:native：
 #   scripts/build-native.cjs 的 resolveRuntime() 只认 vendor/
@@ -240,6 +242,7 @@ jobs:
           "LIBMPV_INCLUDE_DIR=$prefix\include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "LIBMPV_LIBRARY_DIR=$prefix\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "LIBMPV_IMPORT_LIB=$libPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "EMPV_WINDOWS_RUNTIME_DLL=$dll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "prepared pinned libmpv compile input at $prefix"
 
       # 不传 --platform，保持唯一产物名 empv.node。
@@ -268,6 +271,38 @@ jobs:
           }
           Write-Host "produced $nodeFile"
           Get-Item $nodeFile | Format-List FullName, Length
+
+      # Windows loader resolves libmpv beside empv.node. The pinned DLL is a
+      # compile/smoke input only; copying it here does not turn it into a release
+      # artifact and this job never uploads or packages it.
+      - name: Stage the pinned runtime beside empv.node
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:GITHUB_WORKSPACE 'native\build\Release'
+          $nodeFile = Join-Path $output 'empv.node'
+          $runtimeDll = $env:EMPV_WINDOWS_RUNTIME_DLL
+          if (-not (Test-Path $nodeFile)) { throw "missing $nodeFile" }
+          if (-not $runtimeDll -or -not (Test-Path $runtimeDll)) {
+            throw "missing pinned Windows runtime DLL: $runtimeDll"
+          }
+          $stagedDll = Join-Path $output 'libmpv-2.dll'
+          Copy-Item -LiteralPath $runtimeDll -Destination $stagedDll -Force
+          if (-not (Test-Path $stagedDll)) { throw "failed to stage $stagedDll" }
+          "EMPV_SMOKE_ADDON_PATH=$nodeFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "staged runtime-only smoke input at $stagedDll"
+
+      # Pure Node supplies a real Win32 parent HWND from a second session, then
+      # covers SetParent, bounds/scale/suspend, playback, EOF/replay/playlist and
+      # deterministic presenter/session teardown.
+      - name: Run the Windows native runtime and presenter smoke
+        run: pnpm run smoke:windows
+
+      # Real Electron main + utilityProcess generations and a BrowserWindow:
+      # two sessions, isolated teardown, utility SIGKILL without main-process
+      # loss, generation restart/id reuse, source replacement and final cleanup.
+      # Pixel composition remains the interactive hardware gate's responsibility.
+      - name: Run crash-isolated Electron playback smoke
+        run: pnpm run smoke:electron-playback
 
   # ───────────────────────────────────────────────────────────────────────────
   # macOS：'layer' 后端的编译 + 运行时门禁。与 linux 不同，这里不拆两个 job——
@@ -456,8 +491,8 @@ jobs:
   # Node-only smoke 跑 session 半边（mpv 初始化 + 自建 override-redirect 未挂载视频窗口
   # + 播放）；随后 Electron smoke 用 BrowserWindow 提供真实父 X 窗口，覆盖
   # createPresenter/adoptVideoWindow、双 session、playback SIGKILL/respawn 与 teardown。
-  # Windows 运行时由登录桌面的 interactive workflow 覆盖：hosted runner 的
-  # window-station / desktop 交互语义不同，不能冒充用户会话。
+  # Windows hosted job 覆盖同一套 window presenter 与 Electron 生命周期语义；
+  # 登录桌面的 interactive workflow 只额外证明 D3D11 子 HWND 的可见像素合成。
   #
   # first-run 风险（本 job 无法本地复现，首个 CI run 即为验证）：
   #   * apt 包名：libmpv-dev（同时带入运行时 libmpv.so.2，与编译端同源；即便发行版
