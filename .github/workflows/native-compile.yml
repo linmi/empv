@@ -223,6 +223,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
+      # windows-latest 不保证 ffmpeg 在 PATH；两个 runtime smoke 都用它生成
+      # 确定性的本地 testsrc fixture。它只是一项 CI 输入，不进入发布产物。
+      - name: Install ffmpeg smoke dependency
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install ffmpeg -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Chocolatey ffmpeg install exited $LASTEXITCODE" }
+          Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+          refreshenv
+          $ffmpeg = (Get-Command ffmpeg -ErrorAction Stop).Source
+          & $ffmpeg -version
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg -version exited $LASTEXITCODE" }
+          (Split-Path $ffmpeg) | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       # 下载、SHA256、DLL 名与 COFF import library 生成全部由仓库脚本负责；
       # interactive Windows 门禁复用同一脚本和 runtime-pins.mjs，避免两套 pin 漂移。
       - name: Fetch and stage pinned libmpv Windows dev package

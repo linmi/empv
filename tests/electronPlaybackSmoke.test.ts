@@ -51,6 +51,7 @@ describe('integrated Electron playback smoke', () => {
     assert.match(smoke, /assert\.deepEqual\(diagnostics, \[\]\)/)
     assert.match(smoke, /error instanceof AggregateError/)
     assert.match(smoke, /Aggregate error/)
+    assert.match(workflow, /Install ffmpeg smoke dependency[\s\S]*choco install ffmpeg/)
     assert.match(workflow, /Stage the pinned runtime beside empv\.node/)
     assert.match(workflow, /EMPV_SMOKE_ADDON_PATH=\$nodeFile/)
     assert.match(workflow, /Run the Windows native runtime and presenter smoke/)
