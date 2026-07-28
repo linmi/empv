@@ -9,26 +9,41 @@ use crate::session::registry::{self, Presenter};
 
 use super::dto::{JsAttachOptions, JsBounds, JsRenderSize, ZOrder, parse_z_order};
 
+// Electron serializes gfx::AcceleratedWidget on Linux, which is the 32-bit X11
+// resource id. Xlib's Window typedef is pointer-width, but widening happens only
+// after decoding that resource id. Windows serializes the native pointer value.
+#[cfg(target_os = "linux")]
+type ElectronWindowHandle = u32;
+#[cfg(target_os = "windows")]
+type ElectronWindowHandle = usize;
+
 fn error(reason: String) -> Error {
     Error::from_reason(reason)
 }
 
-fn window_handle(buffer: &Buffer) -> Result<usize> {
-    if buffer.len() < std::mem::size_of::<usize>() {
-        return Err(error(
-            "Native window handle buffer is too small.".to_owned(),
+fn decode_window_handle(bytes: &[u8]) -> std::result::Result<usize, String> {
+    const HANDLE_BYTES: usize = std::mem::size_of::<ElectronWindowHandle>();
+    if bytes.len() != HANDLE_BYTES {
+        return Err(format!(
+            "Electron native window handle buffer has invalid size for {}: expected \
+             {HANDLE_BYTES} bytes, received {} bytes.",
+            std::env::consts::OS,
+            bytes.len()
         ));
     }
-    let mut bytes = [0_u8; std::mem::size_of::<usize>()];
-    bytes.copy_from_slice(&buffer[..std::mem::size_of::<usize>()]);
-    let handle = usize::from_ne_bytes(bytes);
+
+    let mut native_bytes = [0_u8; HANDLE_BYTES];
+    native_bytes.copy_from_slice(bytes);
+    let handle = ElectronWindowHandle::from_ne_bytes(native_bytes) as usize;
     if handle == 0 {
-        Err(error(
-            "Unable to resolve the Electron native window handle.".to_owned(),
-        ))
+        Err("Unable to resolve the Electron native window handle.".to_owned())
     } else {
         Ok(handle)
     }
+}
+
+fn window_handle(buffer: &Buffer) -> Result<usize> {
+    decode_window_handle(buffer.as_ref()).map_err(error)
 }
 
 pub fn create_presenter(
@@ -109,4 +124,50 @@ pub fn destroy_presenter(presenter_id: String) -> Result<()> {
 
 pub fn set_window_backdrop(_window_handle: Buffer, _color: Option<String>) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_the_exact_electron_native_handle_abi() {
+        let handle: ElectronWindowHandle = 0x1234;
+
+        assert_eq!(
+            decode_window_handle(&handle.to_ne_bytes()).expect("native window handle"),
+            0x1234
+        );
+    }
+
+    #[test]
+    fn rejects_zero_and_non_exact_handle_buffers() {
+        let zero = ElectronWindowHandle::default().to_ne_bytes();
+        assert_eq!(
+            decode_window_handle(&zero).expect_err("zero handle"),
+            "Unable to resolve the Electron native window handle."
+        );
+
+        let oversized = vec![0_u8; std::mem::size_of::<ElectronWindowHandle>() + 1];
+        let error = decode_window_handle(&oversized).expect_err("oversized handle buffer");
+        assert!(error.contains("has invalid size"));
+        assert!(error.contains(&format!(
+            "expected {} bytes, received {} bytes",
+            std::mem::size_of::<ElectronWindowHandle>(),
+            oversized.len()
+        )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_rejects_a_pointer_width_buffer_instead_of_truncating_it() {
+        let pointer_width_bytes = 0x1234_usize.to_ne_bytes();
+        assert_eq!(pointer_width_bytes.len(), 8);
+
+        assert_eq!(
+            decode_window_handle(&pointer_width_bytes).expect_err("pointer-width handle"),
+            "Electron native window handle buffer has invalid size for linux: expected 4 bytes, \
+             received 8 bytes."
+        );
+    }
 }
