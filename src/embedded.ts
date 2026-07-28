@@ -1,5 +1,4 @@
-import { createRequire } from 'node:module'
-
+import { loadNativeAddonModule } from './nativeAddonLoader.ts'
 import {
   assertLibMpvRuntime,
   type LibMpvRuntime,
@@ -566,17 +565,18 @@ export function normalizeEmbeddedAddon(value: unknown): NormalizedEmbeddedAddon 
 
 export function loadEmbeddedLibMpvAddonFromPath(
   addonPath: string,
-  requireAddon: NodeRequire = createRequire(import.meta.url)
+  requireAddon?: NodeRequire
 ): LibMpvEmbeddedNativeAddon {
-  return normalizeEmbeddedAddon(requireAddon(addonPath)).addon
+  return normalizeEmbeddedAddon(loadNativeAddonModule(addonPath, requireAddon)).addon
 }
 
 export async function loadEmbeddedLibMpvAddon(
   options: EmbeddedLibMpvAddonLoadOptions = {}
 ): Promise<LoadedEmbeddedLibMpvAddon> {
   const runtime = await assertLibMpvRuntime(options)
-  const requireAddon = options.requireAddon ?? createRequire(import.meta.url)
-  const normalized = normalizeEmbeddedAddon(requireAddon(runtime.addonPath))
+  const normalized = normalizeEmbeddedAddon(
+    loadNativeAddonModule(runtime.addonPath, options.requireAddon)
+  )
 
   return { ...normalized, runtime }
 }

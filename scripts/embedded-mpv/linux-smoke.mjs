@@ -8,39 +8,38 @@
 //   xvfb-run -a node --experimental-strip-types \
 //     scripts/embedded-mpv/linux-smoke.mjs <fixture.mp4>
 //
-// It loads build/Release/empv.node DIRECTLY (not through the staged
-// runtime resolver in src/runtime.ts), validates it with the real TypeScript
-// contract normalizer, and drives a real mpv playback of a tiny generated
-// fixture through initial playback, EOF, restart, and playlist behavior.
+// It loads build/Release/empv.node DIRECTLY (not through the staged runtime
+// resolver in src/runtime.ts), using the same platform-aware addon loader and
+// contract validation as production, then drives a real mpv playback of a tiny
+// generated fixture through initial playback, EOF, restart, and playlist
+// behavior.
 //
-// WHY THE DIRECT createRequire LOAD (not loadEmbeddedLibMpvAddon):
+// WHY THE DIRECT PATH LOAD (not loadEmbeddedLibMpvAddon):
 //   src/runtime.ts::resolveRuntime() only accepts the addon staged under
 //   packages/empv/vendor/embedded-mpv/<platform>-<arch> alongside a vendored
 //   LGPL libmpv runtime. CI has NO vendored runtime — it compiles the addon
 //   against the DISTRO's libmpv-dev and links the system libmpv.so.2. So the
-//   resolver would reject this addon. We bypass it and require the Cargo/napi
-//   output path straight, exactly like loadEmbeddedLibMpvAddonFromPath does
-//   internally, then run the same normalize checks the resolver would.
+//   resolver would reject this addon. loadEmbeddedLibMpvAddonFromPath bypasses
+//   only runtime discovery; on Linux it still applies the RTLD_DEEPBIND
+//   dependency isolation used by Electron utility processes.
 //
 // SCOPE — SESSION half only:
 //   This exercises the session-side facet (mpv init + its own unparented X11
 //   video window + playback). It does NOT exercise the presenter-side facet
 //   (createPresenter / adoptVideoWindow reparenting the video window into an app
 //   window): that needs a real parent X window id, and Node has no X11 binding
-//   to create one without pulling a heavy native dependency. Presenter
-//   reparenting therefore remains RUNTIME-UNVERIFIED (compile-verified only).
-//   See the linux-smoke job comment in the workflow.
+//   to create one without pulling a heavy native dependency. The separate
+//   Electron playback smoke in the same CI job owns presenter reparenting,
+//   teardown, utility crash isolation, and generation recovery coverage.
 import assert from 'node:assert/strict'
 import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { normalizeEmbeddedAddon } from '../../src/embedded.ts'
+import { loadEmbeddedLibMpvAddonFromPath } from '../../src/embedded.ts'
 
-const require = createRequire(import.meta.url)
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 
 // scripts/embedded-mpv/ -> ../../native/build/Release/empv.node
@@ -98,16 +97,16 @@ async function main() {
 
   // 0. Load the addon directly. A load failure (missing .node, unresolved
   //    libmpv.so.2, N-API mismatch) throws here and fails the job loudly.
-  let normalized
+  let addon
   try {
-    normalized = normalizeEmbeddedAddon(require(ADDON_PATH))
+    addon = loadEmbeddedLibMpvAddonFromPath(ADDON_PATH)
   } catch (error) {
     fail(
       `Failed to load or normalize the embedded mpv addon from ${ADDON_PATH}: ` +
         `${error instanceof Error ? error.message : String(error)}`
     )
   }
-  const { addon, presentationKind } = normalized
+  const presentationKind = addon.getPresentationKind()
   log('addon loaded and normalized against the embedded contract')
 
   // 1. Presentation kind + support probe (fixed by the Linux backend).
