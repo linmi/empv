@@ -8,6 +8,7 @@ import {
   type EmpvRuntimeClientDiagnostic,
   type EmpvRuntimeClientOptions,
   type EmpvRuntimeFrameEvent,
+  type EmpvRuntimeInvocation,
   type EmpvRuntimeProcessFork,
   type EmpvRuntimeProcessForkOptions,
   type EmpvRuntimeSnapshotEvent,
@@ -21,6 +22,7 @@ export {
   type EmpvRuntimeClientDiagnostic,
   type EmpvRuntimeClientOptions,
   type EmpvRuntimeFrameEvent,
+  type EmpvRuntimeInvocation,
   type EmpvRuntimeSnapshotEvent,
   type EmpvRuntimeTerminalReason
 }

@@ -168,12 +168,13 @@ The smoke creates real Win32 parent/child HWNDs without Electron. It validates
 the native presenter path.
 
 The hosted Windows CI also runs `smoke:electron-playback`. It creates a real
-Electron `BrowserWindow`, starts playback in `utilityProcess`, creates two
-presenters and sessions, tears one down without disturbing the other, kills the
-utility, verifies that Electron and the window survive, starts a fresh
-generation, replaces the source, and checks final cleanup. This is the mandatory
-Windows runtime and lifecycle gate; it deliberately does not claim that video
-pixels were composited into the visible desktop.
+Electron `BrowserWindow`, starts playback in `utilityProcess`, and creates and
+adopts two presenter/session pairs inside that same isolated process. It tears
+one down without disturbing the other, kills the utility, verifies that Electron
+and the window survive without main loading the addon, starts a fresh generation,
+replaces the source, and checks final cleanup. This is the mandatory Windows
+runtime and lifecycle gate; it deliberately does not claim that video pixels
+were composited into the visible desktop.
 
 Pixel-composition validation must run in a logged-in interactive Windows
 desktop. It attaches

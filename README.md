@@ -173,10 +173,14 @@ tracks do not compete with them.
 ## Crash isolation (`empv/electron`)
 
 Loading the addon straight into your main process means a native mpv crash takes
-the whole app down. `empv/electron` keeps the presenter in the main process and
-runs sessions in a separate **playback process**, so a crash costs you that
-runtime generation and nothing else. macOS and Windows use an Electron utility
-process. Linux uses a separately packaged plain Node executable: Chromium
+the whole app down. `empv/electron` runs sessions in a separate **playback
+process**, so a crash costs you that runtime generation and nothing else. The
+Windows/Linux child-window presenter lives in that same process: Electron main
+never loads `empv.node`/libmpv or performs synchronous native operations against
+a utility-owned child window. The macOS CALayer presenter remains in main
+because AppKit must attach to Electron's `NSView`; decoded/rendered IOSurfaces
+still originate in the isolated runtime. macOS and Windows use an Electron
+utility process. Linux uses a separately packaged plain Node executable: Chromium
 utility processes and Electron's `ELECTRON_RUN_AS_NODE` mode both preload
 Chromium's FFmpeg build, whose global symbols are not ABI-compatible with a
 distribution's libmpv dependency chain.
@@ -220,26 +224,29 @@ const client = createEmpvRuntimeClient({
   onDiagnostic: (diagnostic) => logger.warn(diagnostic.type, diagnostic)
 })
 
-// Loads the addon in this process for the presenter, registers the frame link,
-// and presents every bound session's frames. Build it when you first need a
-// presenter -- session control does not require it.
+// Probes the runtime backend. Only a macOS layer backend loads its presenter
+// facet in main and registers the frame link; a window backend remains native-
+// free in Electron main.
 const host = await createEmpvPlaybackHost({ client, frameLinkServiceName })
-const presenterByRuntimeSession = new Map<string, string>()
+const owned = new Map<
+  string,
+  { generation: number; presenterId: string; presentationKind: 'layer' | 'window' }
+>()
 
 client.onExit((error, sessions) => {
-  // A playback-process exit is terminal for every session in that generation. Remove
-  // each main-process presenter/binding and invalidate any renderer-facing id;
-  // a later invoke starts a new generation, not a recovered session. Iterate
-  // owned state, not `sessions`: that argument is the last heartbeat snapshot
-  // for diagnostics and may predate a just-created session.
+  // Exit is terminal for every session in that generation. The host forgets
+  // runtime-owned window presenters without sending cleanup to a replacement
+  // generation. Layer presenters remain local resources and must be destroyed.
   const cleanupFailures: unknown[] = []
-  for (const [runtimeSessionId, presenterId] of presenterByRuntimeSession) {
-    try {
-      host.destroyPresenter(presenterId)
-    } catch (cleanupError) {
-      cleanupFailures.push(cleanupError)
+  for (const [runtimeSessionId, record] of owned) {
+    if (record.presentationKind === 'layer') {
+      try {
+        host.destroyPresenter(record.presenterId)
+      } catch (cleanupError) {
+        cleanupFailures.push(cleanupError)
+      }
     }
-    presenterByRuntimeSession.delete(runtimeSessionId)
+    owned.delete(runtimeSessionId)
   }
   diagnoseLostGeneration(error, sessions)
   if (cleanupFailures.length) {
@@ -249,64 +256,68 @@ client.onExit((error, sessions) => {
   }
 })
 
-const { sessionId, videoWindowHandle } = await client.invoke('createSession', {
-  options: { volume: 1 }
-})
-// Native session ids are scoped to one playback generation and may be reused
-// after a crash. Give the main-process presenter its own lifetime-unique id.
+const {
+  generation,
+  result: { sessionId }
+} = await client.invokeWithGeneration('createSession', { options: { volume: 1 } })
+// Native session ids are generation-scoped and may be reused after a crash.
+// Presenter ids exposed to the rest of the app must be lifetime-unique.
 const presenterId = `empv-presenter-${randomUUID()}`
 
-// Branch before creating the presenter. The two backends take different attach
-// options -- only 'layer' can composite beneath the web contents -- so on the
-// union nothing backend-specific is callable.
-const renderSize =
-  host.presentationKind === 'layer'
-    ? host.createPresenter(presenterId, window.getNativeWindowHandle(), {
-        ...bounds,
-        zOrder: 'underlay'
-      })
-    : host.createPresenter(presenterId, window.getNativeWindowHandle(), {
-        ...bounds,
-        zOrder: 'overlay'
-      })
-
-// 'window' renders into an OS child window the utility owns; the presenter has
-// to adopt it before anything appears.
-if (host.presentationKind === 'window' && videoWindowHandle !== null) {
-  host.adoptVideoWindow(presenterId, videoWindowHandle)
+if (host.presentationKind === 'layer') {
+  const renderSize = host.createPresenter(presenterId, window.getNativeWindowHandle(), {
+    ...bounds,
+    zOrder: 'underlay'
+  })
+  host.bindSessionToPresenter(sessionId, presenterId)
+  await client.invokeInGeneration(
+    generation,
+    'setRenderSize',
+    sessionId,
+    renderSize.widthPixels,
+    renderSize.heightPixels
+  )
+} else {
+  // Creation and child-window adoption are one rollback-safe runtime
+  // transaction. The returned size is applied to the session there too.
+  await host.createPresenter(presenterId, generation, sessionId, window.getNativeWindowHandle(), {
+    ...bounds,
+    zOrder: 'overlay'
+  })
 }
 
-host.bindSessionToPresenter(sessionId, presenterId)
-presenterByRuntimeSession.set(sessionId, presenterId)
-
-await client.invoke('setRenderSize', sessionId, renderSize.widthPixels, renderSize.heightPixels)
-await client.invoke('loadPlayback', sessionId, {
+owned.set(sessionId, { generation, presenterId, presentationKind: host.presentationKind })
+await client.invokeInGeneration(generation, 'loadPlayback', sessionId, {
   streamUrl: '/path/to/video.mkv'
 })
-await client.invoke('setPaused', sessionId, false)
+await client.invokeInGeneration(generation, 'setPaused', sessionId, false)
 
 client.onSnapshot(({ snapshot }) => render(snapshot))
 ```
 
-Frames never appear in your code: the host turns each one into the right
-`presentSurface` call for whichever presenter the session is bound to, and drops
-frames for sessions that are not bound. `destroyPresenter` removes that binding
-before native teardown begins. If native teardown fails, the presenter remains
-owned in an explicit cleanup-only state: frame delivery and ordinary presenter
-operations stay disabled, while another `destroyPresenter` or final `dispose`
-call can retry cleanup. `dispose` exhaustively attempts every remaining
-presenter, the frame listener, and the macOS frame link; failed steps remain
-retryable and successful disposal is idempotent.
+On `layer`, frames never appear in your code: the host turns each event into the
+right `presentSurface` call for its bound presenter. On `window`, presenter
+create, bounds, scale, suspension and destruction are ordered, timeout-bounded
+requests pinned to the generation that owns the session. Normal teardown awaits
+`host.destroyPresenter(presenterId)` before
+`client.invokeInGeneration(generation, 'disposeSession', sessionId)`, so the
+child is detached before session teardown. A failed native window mutation makes
+that generation terminal because attachment ownership can no longer be proven.
+`dispose` exhaustively attempts remaining resources; completed disposal is
+idempotent and incomplete cleanup is reported explicitly.
 
 `zOrder: 'underlay'` exists only on `layer`. The `window` backend reparents an OS
 child window, which always composites above the web contents its parent draws, so
 its attach options cannot express an underlay and the addon refuses one. Branching
 on `presentationKind` is what makes that a compile error rather than a surprise.
 
-The protocol methods are the addon's own -- `seek`, `setVolume`, `playlistSync`
--- because the contract is derived from the addon interface rather than restated.
-A method added to the addon is callable through `client.invoke` without editing a
-table, and a method missing from the forwarding list fails to compile.
+The protocol derives session methods such as `seek`, `setVolume`, and
+`playlistSync` from the addon interface, while the client API encodes ownership:
+`invoke` accepts only stateless probes, `invokeWithGeneration` creates a session
+and returns the exact generation that answered, and every later session or
+presenter request must use `invokeInGeneration`. A stale raw id therefore cannot
+silently respawn a process and land on an id reused by a later generation. A
+method missing from the forwarding list still fails to compile.
 
 The client owns spawn/respawn, request-reply correlation and event fan-out. It
 deliberately does **not** own a liveness watchdog: it reports heartbeats through

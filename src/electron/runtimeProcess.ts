@@ -1,4 +1,10 @@
-import { loadEmbeddedLibMpvAddon, type LoadedEmbeddedLibMpvAddon } from '../embedded.ts'
+import { Buffer } from 'node:buffer'
+
+import {
+  loadEmbeddedLibMpvAddon,
+  type LibMpvWindowAddon,
+  type LoadedEmbeddedLibMpvAddon
+} from '../embedded.ts'
 
 import {
   EMPV_FORWARDED_METHODS,
@@ -9,14 +15,16 @@ import {
   type EmpvRuntimeRequest,
   type EmpvRuntimeResponse,
   type EmpvRuntimeSessionLifecycle,
-  type EmpvRuntimeSessionState
+  type EmpvRuntimeSessionState,
+  type EmpvRuntimeWindowPresenterLifecycle
 } from './protocol.ts'
 
-// Isolated playback process: hosts the embedded mpv sessions (decode + GL render
-// into IOSurfaces). Loading the native addon and running mpv here means a native
-// mpv crash takes down only this process; the main process presenter survives
-// and recovers. AppKit never runs here — rendered frames are handed to the
-// main-process presenter over the MessagePort as pool ids + a per-frame index.
+// Isolated playback process: owns embedded mpv sessions and, for the window
+// backend, the native presenter that adopts each session's child video window.
+// Keeping both HWND-owning resources on this process/thread boundary prevents
+// synchronous cross-thread Win32 presentation calls from blocking Electron's
+// main process. The macOS layer presenter remains in the main process and
+// receives rendered IOSurfaces over the frame link.
 //
 // This module is the whole playback process. A consumer's runtime entry is
 // expected to be nothing but:
@@ -35,6 +43,16 @@ class EmpvRuntimeGenerationFailure extends Error {
     super(message, options)
     this.name = 'EmpvRuntimeGenerationFailure'
   }
+}
+
+type RuntimeWindowPresenterState = {
+  presenterId: string
+  state: EmpvRuntimeWindowPresenterLifecycle
+}
+
+type RuntimeSessionRecord = {
+  state: EmpvRuntimeSessionLifecycle
+  windowPresenter: RuntimeWindowPresenterState | null
 }
 
 export type EmpvRuntimeProcessOptions = {
@@ -130,7 +148,8 @@ export function startEmpvRuntimeProcess(
   const removeParentDisconnectListener =
     runtimeParentPort.onDisconnect?.(() => exitProcess(0)) ?? (() => {})
 
-  const sessions = new Map<string, EmpvRuntimeSessionLifecycle>()
+  const sessions = new Map<string, RuntimeSessionRecord>()
+  const sessionByWindowPresenter = new Map<string, string>()
   let idleTimer: NodeJS.Timeout | null = null
   let heartbeatTimer: NodeJS.Timeout | null = null
   let generationFailureExit: NodeJS.Immediate | null = null
@@ -147,7 +166,11 @@ export function startEmpvRuntimeProcess(
   }
 
   function sessionStates(): EmpvRuntimeSessionState[] {
-    return [...sessions].map(([sessionId, state]) => ({ sessionId, state }))
+    return [...sessions].map(([sessionId, record]) => ({
+      sessionId,
+      state: record.state,
+      windowPresenter: record.windowPresenter ? { ...record.windowPresenter } : null
+    }))
   }
 
   function scheduleGenerationFailureExit(error: Error): void {
@@ -184,27 +207,116 @@ export function startEmpvRuntimeProcess(
   }
 
   function setSessionState(sessionId: string, state: EmpvRuntimeSessionLifecycle): void {
-    sessions.set(sessionId, state)
+    const record = sessions.get(sessionId)
+    if (record) {
+      record.state = state
+    } else {
+      sessions.set(sessionId, { state, windowPresenter: null })
+    }
     publishHeartbeat()
   }
 
   function removeSession(sessionId: string): void {
+    const record = sessions.get(sessionId)
+    if (record?.windowPresenter) {
+      sessionByWindowPresenter.delete(record.windowPresenter.presenterId)
+    }
     sessions.delete(sessionId)
     publishHeartbeat()
   }
 
-  function requireActiveSession(sessionId: string, method: string): void {
-    const state = sessions.get(sessionId)
-    if (state === undefined) {
+  function requireActiveSession(sessionId: string, method: string): RuntimeSessionRecord {
+    const record = sessions.get(sessionId)
+    if (record === undefined) {
       throw new Error(
         `Cannot run empv runtime method ${method}: session ${sessionId} does not exist in this process generation.`
       )
     }
-    if (state !== 'active') {
+    if (record.state !== 'active') {
       throw new Error(
-        `Cannot run empv runtime method ${method}: session ${sessionId} is ${state}, not active.`
+        `Cannot run empv runtime method ${method}: session ${sessionId} is ${record.state}, not active.`
       )
     }
+    return record
+  }
+
+  function requireWindowAddon(
+    loaded: LoadedEmbeddedLibMpvAddon,
+    method: string
+  ): LibMpvWindowAddon {
+    if (loaded.presentationKind !== 'window') {
+      throw new Error(
+        `Cannot run empv runtime method ${method}: the active backend is ${loaded.presentationKind}, not window.`
+      )
+    }
+    return loaded.addon
+  }
+
+  function requireActiveWindowPresenter(
+    presenterId: string,
+    method: string
+  ): { sessionId: string; session: RuntimeSessionRecord } {
+    const sessionId = sessionByWindowPresenter.get(presenterId)
+    if (!sessionId) {
+      throw new Error(
+        `Cannot run empv runtime method ${method}: window presenter ${presenterId} does not exist in this process generation.`
+      )
+    }
+    const session = requireActiveSession(sessionId, method)
+    const presenter = session.windowPresenter
+    if (!presenter || presenter.presenterId !== presenterId) {
+      throw new EmpvRuntimeGenerationFailure(
+        `Window presenter index ${presenterId} points to session ${sessionId}, but the session does not own that presenter.`
+      )
+    }
+    if (presenter.state !== 'active') {
+      throw new Error(
+        `Cannot run empv runtime method ${method}: window presenter ${presenterId} is ${presenter.state}, not active.`
+      )
+    }
+    return { sessionId, session }
+  }
+
+  function setWindowPresenterState(
+    session: RuntimeSessionRecord,
+    presenterId: string,
+    state: EmpvRuntimeWindowPresenterLifecycle
+  ): void {
+    session.windowPresenter = { presenterId, state }
+    publishHeartbeat()
+  }
+
+  function clearWindowPresenter(session: RuntimeSessionRecord, presenterId: string): void {
+    sessionByWindowPresenter.delete(presenterId)
+    session.windowPresenter = null
+    publishHeartbeat()
+  }
+
+  function destroyWindowPresenterNative(
+    addon: LibMpvWindowAddon,
+    session: RuntimeSessionRecord,
+    presenterId: string
+  ): void {
+    setWindowPresenterState(session, presenterId, 'disposing')
+    try {
+      addon.destroyPresenter(presenterId)
+    } catch (error) {
+      setWindowPresenterState(session, presenterId, 'cleanup-required')
+      throw new EmpvRuntimeGenerationFailure(
+        `Native destruction failed for empv window presenter ${presenterId}; attachment ownership is unknown and this runtime generation cannot continue: ${normalizeError(error).message}`,
+        { cause: error }
+      )
+    }
+    clearWindowPresenter(session, presenterId)
+  }
+
+  function synchronizeWindowRenderSize(
+    addon: LibMpvWindowAddon,
+    sessionId: string,
+    renderSize: { widthPixels: number; heightPixels: number }
+  ): void {
+    if (renderSize.widthPixels <= 0 || renderSize.heightPixels <= 0) return
+    addon.setRenderSize(sessionId, renderSize.widthPixels, renderSize.heightPixels)
   }
 
   async function getLoaded(): Promise<LoadedEmbeddedLibMpvAddon> {
@@ -246,6 +358,11 @@ export function startEmpvRuntimeProcess(
     const { addon } = loaded
 
     switch (request.method) {
+      case 'probe':
+        return {
+          presentationKind: loaded.presentationKind,
+          supported: addon.isSupported()
+        }
       case 'createSession': {
         const [input] = request.args
         // sessionId is only known once createSession resolves, so route the
@@ -255,7 +372,7 @@ export function startEmpvRuntimeProcess(
         let createdSessionId: string | null = null
         const onSnapshotChanged = (): void => {
           try {
-            if (!createdSessionId || sessions.get(createdSessionId) !== 'active') return
+            if (!createdSessionId || sessions.get(createdSessionId)?.state !== 'active') return
             post({
               type: 'session.snapshot',
               sessionId: createdSessionId,
@@ -271,7 +388,7 @@ export function startEmpvRuntimeProcess(
           contentGeneration: number
         ): void => {
           try {
-            if (!createdSessionId || sessions.get(createdSessionId) !== 'active') return
+            if (!createdSessionId || sessions.get(createdSessionId)?.state !== 'active') return
             post({
               type: 'session.frame',
               sessionId: createdSessionId,
@@ -298,13 +415,12 @@ export function startEmpvRuntimeProcess(
           // Assemble the complete public result before publishing the session
           // as active. If either read fails, native creation is rolled back and
           // the caller never receives an id for a partial session.
-          const videoWindowHandle =
-            loaded.presentationKind === 'window'
-              ? loaded.addon.getVideoWindowHandle(sessionId)
-              : null
-          if (loaded.presentationKind === 'window' && videoWindowHandle === null) {
+          if (
+            loaded.presentationKind === 'window' &&
+            loaded.addon.getVideoWindowHandle(sessionId) === null
+          ) {
             throw new Error(
-              `Window-backed native session ${sessionId} did not expose the video window handle required for adoption.`
+              `Window-backed native session ${sessionId} did not expose the video window handle required for isolated presentation.`
             )
           }
           const snapshot = addon.getSessionSnapshot(sessionId)
@@ -315,7 +431,7 @@ export function startEmpvRuntimeProcess(
           }
           createdSessionId = sessionId
           setSessionState(sessionId, 'active')
-          return { sessionId, snapshot, videoWindowHandle }
+          return { sessionId, snapshot }
         } catch (createResultError) {
           createdSessionId = null
           setSessionState(sessionId, 'disposing')
@@ -335,6 +451,120 @@ export function startEmpvRuntimeProcess(
           )
         }
       }
+      case 'createWindowPresenter': {
+        const [input] = request.args
+        const windowAddon = requireWindowAddon(loaded, request.method)
+        const session = requireActiveSession(input.sessionId, request.method)
+        if (session.windowPresenter) {
+          throw new Error(
+            `Cannot create empv window presenter ${input.presenterId}: session ${input.sessionId} already owns presenter ${session.windowPresenter.presenterId} (${session.windowPresenter.state}).`
+          )
+        }
+        const existingSessionId = sessionByWindowPresenter.get(input.presenterId)
+        if (existingSessionId) {
+          throw new Error(
+            `Cannot create duplicate empv window presenter ${input.presenterId}: it is already owned by session ${existingSessionId}.`
+          )
+        }
+        if (!(input.parentWindowHandle instanceof Uint8Array)) {
+          throw new Error(
+            `Cannot create empv window presenter ${input.presenterId}: parentWindowHandle must be a Uint8Array.`
+          )
+        }
+
+        sessionByWindowPresenter.set(input.presenterId, input.sessionId)
+        setWindowPresenterState(session, input.presenterId, 'creating')
+        let nativePresenterCreated = false
+        try {
+          const renderSize = windowAddon.createPresenter(
+            input.presenterId,
+            Buffer.from(input.parentWindowHandle),
+            input.options
+          )
+          nativePresenterCreated = true
+          const childWindowHandle = windowAddon.getVideoWindowHandle(input.sessionId)
+          if (childWindowHandle === null) {
+            throw new Error(
+              `Window-backed native session ${input.sessionId} lost its video window before presenter ${input.presenterId} could adopt it.`
+            )
+          }
+          windowAddon.adoptVideoWindow(input.presenterId, childWindowHandle)
+          synchronizeWindowRenderSize(windowAddon, input.sessionId, renderSize)
+          setWindowPresenterState(session, input.presenterId, 'active')
+          return renderSize
+        } catch (createError) {
+          if (!nativePresenterCreated) {
+            clearWindowPresenter(session, input.presenterId)
+            throw createError
+          }
+          try {
+            windowAddon.destroyPresenter(input.presenterId)
+          } catch (rollbackError) {
+            setWindowPresenterState(session, input.presenterId, 'cleanup-required')
+            throw new EmpvRuntimeGenerationFailure(
+              `Failed to create empv window presenter ${input.presenterId}: ${normalizeError(createError).message}. Native presenter rollback also failed, so generation ownership is unknown: ${normalizeError(rollbackError).message}`,
+              { cause: rollbackError }
+            )
+          }
+          clearWindowPresenter(session, input.presenterId)
+          throw new Error(
+            `Failed to create empv window presenter ${input.presenterId}; native creation was rolled back: ${normalizeError(createError).message}`,
+            { cause: createError }
+          )
+        }
+      }
+      case 'setWindowPresenterBounds': {
+        const [presenterId, bounds] = request.args
+        const windowAddon = requireWindowAddon(loaded, request.method)
+        const { sessionId } = requireActiveWindowPresenter(presenterId, request.method)
+        try {
+          const renderSize = windowAddon.setPresenterBounds(presenterId, bounds)
+          synchronizeWindowRenderSize(windowAddon, sessionId, renderSize)
+          return renderSize
+        } catch (error) {
+          throw new EmpvRuntimeGenerationFailure(
+            `Failed to update empv window presenter ${presenterId} bounds; native presentation state is no longer trustworthy: ${normalizeError(error).message}`,
+            { cause: error }
+          )
+        }
+      }
+      case 'refreshWindowPresenterScale': {
+        const [presenterId] = request.args
+        const windowAddon = requireWindowAddon(loaded, request.method)
+        const { sessionId } = requireActiveWindowPresenter(presenterId, request.method)
+        try {
+          const renderSize = windowAddon.refreshPresenterScale(presenterId)
+          synchronizeWindowRenderSize(windowAddon, sessionId, renderSize)
+          return renderSize
+        } catch (error) {
+          throw new EmpvRuntimeGenerationFailure(
+            `Failed to refresh empv window presenter ${presenterId} scale; native presentation state is no longer trustworthy: ${normalizeError(error).message}`,
+            { cause: error }
+          )
+        }
+      }
+      case 'setWindowPresenterSuspended': {
+        const [presenterId, suspended] = request.args
+        const windowAddon = requireWindowAddon(loaded, request.method)
+        const { sessionId } = requireActiveWindowPresenter(presenterId, request.method)
+        try {
+          windowAddon.setPresenterSuspended(presenterId, suspended)
+          windowAddon.setPresentationSuspended(sessionId, suspended)
+          return undefined
+        } catch (error) {
+          throw new EmpvRuntimeGenerationFailure(
+            `Failed to update empv window presenter ${presenterId} suspension; native presentation state is no longer trustworthy: ${normalizeError(error).message}`,
+            { cause: error }
+          )
+        }
+      }
+      case 'destroyWindowPresenter': {
+        const [presenterId] = request.args
+        const windowAddon = requireWindowAddon(loaded, request.method)
+        const { session } = requireActiveWindowPresenter(presenterId, request.method)
+        destroyWindowPresenterNative(windowAddon, session, presenterId)
+        return undefined
+      }
       case 'loadPlayback': {
         const [sessionId, playback] = request.args
         requireActiveSession(sessionId, request.method)
@@ -352,12 +582,36 @@ export function startEmpvRuntimeProcess(
       }
       case 'disposeSession': {
         const [sessionId] = request.args
-        requireActiveSession(sessionId, request.method)
+        const session = requireActiveSession(sessionId, request.method)
         setSessionState(sessionId, 'disposing')
+        const cleanupFailures: Error[] = []
         try {
-          await addon.disposeSession(sessionId)
+          if (session.windowPresenter) {
+            const presenterId = session.windowPresenter.presenterId
+            try {
+              destroyWindowPresenterNative(
+                requireWindowAddon(loaded, request.method),
+                session,
+                presenterId
+              )
+            } catch (error) {
+              cleanupFailures.push(normalizeError(error))
+            }
+          }
+          try {
+            await addon.disposeSession(sessionId)
+          } catch (error) {
+            cleanupFailures.push(normalizeError(error))
+          }
+          if (cleanupFailures.length > 0) {
+            throw new EmpvRuntimeGenerationFailure(
+              `Native disposal failed for empv runtime session ${sessionId}; presenter/session cleanup ownership is unknown: ${cleanupFailures.map((error) => error.message).join('; ')}`,
+              { cause: cleanupFailures[0] }
+            )
+          }
           return undefined
         } catch (error) {
+          if (error instanceof EmpvRuntimeGenerationFailure) throw error
           throw new EmpvRuntimeGenerationFailure(
             `Native disposal failed for empv runtime session ${sessionId}; the native registry already removed the session, but complete resource cleanup is unknown: ${normalizeError(error).message}`,
             { cause: error }

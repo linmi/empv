@@ -166,9 +166,9 @@ export type LibMpvCapturedFrame = {
   widthPixels: number
 }
 
-// Render pixel size the utility session must size its IOSurface pool to. The
-// main-process presenter owns the hosting window's backingScaleFactor, so it
-// derives pixel sizes from CSS bounds and relays them to the session.
+// Render pixel size the native session must render to. The layer presenter
+// derives it in main; the window presenter derives and applies it in the
+// isolated runtime that owns both presenter and session.
 export type LibMpvRenderSize = {
   heightPixels: number
   widthPixels: number
@@ -193,11 +193,10 @@ export type LibMpvFrameNotifier = (
   contentGeneration: number
 ) => void
 
-// How a backend gets decoded video from the isolated playback process to the on-screen
-// window. macOS ships IOSurfaces to a CALayer over a mach frame link
-// ('layer'); Windows/Linux embed an OS video window that the main
-// process reparents into the app window ('window'). Callers MUST branch on
-// this to reach the right presentation facet — the two facets are disjoint.
+// How a backend gets decoded video to the on-screen window. macOS ships
+// IOSurfaces to a main-process CALayer over a mach frame link ('layer');
+// Windows/Linux embed an OS video window entirely inside the isolated runtime
+// ('window'). Callers MUST branch on this to reach the right facet.
 export type LibMpvPresentationKind = 'layer' | 'window'
 
 // The API family every backend exports regardless of presentation model: mpv
@@ -320,12 +319,11 @@ export type LibMpvEmbeddedCoreAddon = {
   startRecording(sessionId: string, targetPath: string): void
   stopRecording(sessionId: string): void
 
-  // --- Presenter-side API (main process) ---
+  // --- Presenter-side API (main for layer, isolated runtime for window) ---
   // Creates the presenter for the window resolved from the Electron native window
   // handle, keyed by an opaque presenterId, and returns the render pixel size the
-  // session must size to. On 'layer' this attaches a CALayer; on
-  // 'window' it stores the parent window + bounds and reparents the session's
-  // video window once adoptVideoWindow supplies the child handle.
+  // session must size to. On 'layer' this attaches a CALayer; on 'window' it
+  // stores the parent window + bounds before adopting the session child window.
   // createPresenter is NOT here: the two backends take different attach options,
   // and an intersection type cannot narrow a member the core already declares --
   // it would add an overload and leave the permissive one callable. Each facet
@@ -394,9 +392,9 @@ export type LibMpvLayerAddon = LibMpvEmbeddedCoreAddon & {
   unobserveWindowOcclusion(windowHandle: Buffer): void
 }
 
-// Windows/Linux: mpv renders into an OS video window the playback process owns;
-// the main-process presenter reparents it into the app window. No mach frame
-// link exists, so the mach-link functions are absent by design.
+// Windows/Linux: mpv and the presenter share the isolated runtime. Presenter
+// creation and adoption are composed there so Electron main never synchronously
+// mutates a utility-owned child window. No mach frame link exists.
 export type LibMpvWindowAddon = LibMpvEmbeddedCoreAddon & {
   getPresentationKind(): 'window'
   // Overlay only. See LibMpvWindowAttachOptions.
@@ -405,9 +403,8 @@ export type LibMpvWindowAddon = LibMpvEmbeddedCoreAddon & {
     windowHandle: Buffer,
     options: LibMpvWindowAttachOptions
   ): LibMpvRenderSize
-  // The session's video window handle (HWND / X11 window id, as a number), read
-  // by the playback runtime and shipped to the main process. null when the
-  // session is unknown or has no window yet.
+  // The session's video window handle (HWND / X11 window id), consumed only
+  // inside the isolated runtime transaction. null when no window exists.
   getVideoWindowHandle(sessionId: string): number | null
   // Hands the presenter the session's video window handle so it can reparent it
   // into the app window (reparents now if the parent is already known).

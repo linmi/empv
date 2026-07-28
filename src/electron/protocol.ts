@@ -1,15 +1,18 @@
 import type {
   LibMpvEmbeddedCoreAddon,
   LibMpvPlayback,
+  LibMpvPresentationKind,
+  LibMpvRenderSize,
   LibMpvSessionOptions,
-  LibMpvSessionSnapshot
+  LibMpvSessionSnapshot,
+  LibMpvVideoLayerBounds,
+  LibMpvWindowAttachOptions
 } from '../embedded.ts'
 
 // Typed request/reply + event protocol between an Electron main process and the
-// isolated playback process (runtimeProcess.ts). That process hosts the mpv
-// sessions (decode + GL render into IOSurfaces); the main process owns the
-// presenter (CALayer/NSView attachment, or the reparented video window) and the
-// renderer-facing IPC.
+// isolated playback process (runtimeProcess.ts). That process owns mpv sessions
+// and Windows/Linux child-window presenters. The main process owns only the
+// macOS CALayer/NSView presenter plus renderer-facing IPC.
 //
 // The protocol is DERIVED from the addon contract rather than restated. Most of
 // the session API is "call this addon method with these arguments and send back
@@ -28,11 +31,10 @@ export type EmpvRuntimeCapturedFrame = {
   widthPixels: number
 }
 
-// A session starts UNSIZED: no render size is supplied at create time. The
-// main-process presenter (which owns the hosting window's backingScaleFactor)
-// derives the first real pixel size from CSS bounds and pushes it later through
-// setRenderSize. Until then the utility renders through the SKIP_RENDERING
-// consume path so vo_libmpv never stalls.
+// A session starts UNSIZED. A layer presenter derives the first pixel size in
+// main and sends setRenderSize; a window presenter derives and applies it inside
+// its runtime create/bounds transaction. Until then the utility renders through
+// the SKIP_RENDERING consume path so vo_libmpv never stalls.
 export type EmpvRuntimeSessionCreateInput = {
   options: LibMpvSessionOptions
 }
@@ -43,11 +45,6 @@ export type EmpvRuntimeSessionCreateResult = {
   // the utility and native registries already disagree, so creation rolls back
   // instead of publishing such a result.
   snapshot: LibMpvSessionSnapshot
-  // 'window' backends render into an OS video window the utility owns; its
-  // native handle is shipped here so the main-process presenter can reparent it
-  // (adoptVideoWindow). null on 'layer', where frames cross the mach
-  // frame link instead and there is no window to adopt.
-  videoWindowHandle: number | null
 }
 
 // The utility is the authority for a native session's lifecycle within one
@@ -60,11 +57,38 @@ export type EmpvRuntimeSessionLifecycle = 'creating' | 'active' | 'disposing'
 export type EmpvRuntimeSessionState = {
   sessionId: string
   state: EmpvRuntimeSessionLifecycle
+  windowPresenter: {
+    presenterId: string
+    state: EmpvRuntimeWindowPresenterLifecycle
+  } | null
 }
 
-// The presenter half of the addon runs in the main process against a real
-// window; it is never reachable through this protocol. getPresentationKind is
-// excluded too: the kind is probed at load time on each side.
+export type EmpvRuntimeWindowPresenterLifecycle =
+  | 'creating'
+  | 'active'
+  | 'disposing'
+  | 'cleanup-required'
+
+export type EmpvRuntimeProbeResult = {
+  presentationKind: LibMpvPresentationKind
+  supported: boolean
+}
+
+export type EmpvRuntimeWindowPresenterCreateInput = {
+  options: LibMpvWindowAttachOptions
+  // Electron Buffer values cross utilityProcess and Node advanced IPC as a
+  // structured-clone byte array. The runtime reconstructs the Buffer only at
+  // the native boundary.
+  parentWindowHandle: Uint8Array
+  presenterId: string
+  sessionId: string
+}
+
+// Layer presentation must attach AppKit state to the Electron-owned NSView, so
+// that presenter remains in main. Window presentation is different: the runtime
+// owns the child HWND/X11 Window and every operation on it must execute in that
+// same isolated generation. These names are therefore hand-written protocol
+// transactions rather than direct addon forwarding.
 type EmpvPresenterMethod =
   | 'getPresentationKind'
   | 'createPresenter'
@@ -75,13 +99,26 @@ type EmpvPresenterMethod =
   | 'setWindowBackdrop'
 
 // Methods the utility cannot forward as-is:
+// - probe reports the runtime's real backend without loading the addon in main.
 // - createSession takes callbacks, which cannot cross a MessagePort; the
 //   utility holds them and republishes them as events.
 // - loadPlayback is followed by setPaused(true) so the first frame lands as a
 //   poster, and answers with the post-load snapshot.
 // - disposeSession has to leave the utility's own session bookkeeping correct.
 // - captureFrame returns a Buffer, which arrives as a Uint8Array.
-type EmpvHandWrittenMethod = 'createSession' | 'loadPlayback' | 'disposeSession' | 'captureFrame'
+// - window presenter methods enforce generation/session ownership and make
+//   native create+adopt one rollback-safe transaction.
+type EmpvHandWrittenMethod =
+  | 'probe'
+  | 'createSession'
+  | 'loadPlayback'
+  | 'disposeSession'
+  | 'captureFrame'
+  | 'createWindowPresenter'
+  | 'setWindowPresenterBounds'
+  | 'refreshWindowPresenterScale'
+  | 'setWindowPresenterSuspended'
+  | 'destroyWindowPresenter'
 
 export type EmpvForwardedMethod = Exclude<
   keyof LibMpvEmbeddedCoreAddon,
@@ -135,29 +172,59 @@ void _forwardedMethodsAreComplete
 
 export type EmpvRuntimeMethod = EmpvForwardedMethod | EmpvHandWrittenMethod
 
+export const EMPV_RUNTIME_UNOWNED_METHODS = ['probe', 'isSupported'] as const
+export type EmpvRuntimeUnownedMethod = (typeof EMPV_RUNTIME_UNOWNED_METHODS)[number]
+export const EMPV_RUNTIME_SESSION_CREATE_METHOD = 'createSession' as const
+export type EmpvRuntimeSessionCreateMethod = typeof EMPV_RUNTIME_SESSION_CREATE_METHOD
+export type EmpvRuntimeOwnedMethod = Exclude<
+  EmpvRuntimeMethod,
+  EmpvRuntimeUnownedMethod | EmpvRuntimeSessionCreateMethod
+>
+
 export type EmpvRuntimeArgs<Method extends EmpvRuntimeMethod> = Method extends EmpvForwardedMethod
   ? Parameters<LibMpvEmbeddedCoreAddon[Method]>
-  : Method extends 'createSession'
-    ? [input: EmpvRuntimeSessionCreateInput]
-    : Method extends 'loadPlayback'
-      ? [sessionId: string, playback: LibMpvPlayback]
-      : Method extends 'disposeSession'
-        ? [sessionId: string]
-        : Method extends 'captureFrame'
+  : Method extends 'probe'
+    ? []
+    : Method extends 'createSession'
+      ? [input: EmpvRuntimeSessionCreateInput]
+      : Method extends 'loadPlayback'
+        ? [sessionId: string, playback: LibMpvPlayback]
+        : Method extends 'disposeSession'
           ? [sessionId: string]
-          : never
+          : Method extends 'captureFrame'
+            ? [sessionId: string]
+            : Method extends 'createWindowPresenter'
+              ? [input: EmpvRuntimeWindowPresenterCreateInput]
+              : Method extends 'setWindowPresenterBounds'
+                ? [presenterId: string, bounds: LibMpvVideoLayerBounds]
+                : Method extends 'refreshWindowPresenterScale'
+                  ? [presenterId: string]
+                  : Method extends 'setWindowPresenterSuspended'
+                    ? [presenterId: string, suspended: boolean]
+                    : Method extends 'destroyWindowPresenter'
+                      ? [presenterId: string]
+                      : never
 
 export type EmpvRuntimeResult<Method extends EmpvRuntimeMethod> = Method extends EmpvForwardedMethod
   ? ReturnType<LibMpvEmbeddedCoreAddon[Method]>
-  : Method extends 'createSession'
-    ? EmpvRuntimeSessionCreateResult
-    : Method extends 'loadPlayback'
-      ? LibMpvSessionSnapshot
-      : Method extends 'disposeSession'
-        ? void
-        : Method extends 'captureFrame'
-          ? EmpvRuntimeCapturedFrame | null
-          : never
+  : Method extends 'probe'
+    ? EmpvRuntimeProbeResult
+    : Method extends 'createSession'
+      ? EmpvRuntimeSessionCreateResult
+      : Method extends 'loadPlayback'
+        ? LibMpvSessionSnapshot
+        : Method extends 'disposeSession'
+          ? void
+          : Method extends 'captureFrame'
+            ? EmpvRuntimeCapturedFrame | null
+            : Method extends
+                  | 'createWindowPresenter'
+                  | 'setWindowPresenterBounds'
+                  | 'refreshWindowPresenterScale'
+              ? LibMpvRenderSize
+              : Method extends 'setWindowPresenterSuspended' | 'destroyWindowPresenter'
+                ? void
+                : never
 
 export type EmpvRuntimeRequest<Method extends EmpvRuntimeMethod = EmpvRuntimeMethod> =
   Method extends EmpvRuntimeMethod

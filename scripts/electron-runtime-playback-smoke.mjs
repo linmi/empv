@@ -13,7 +13,6 @@ import {
   createEmpvPlaybackHost,
   createEmpvRuntimeClient
 } from '../dist/electron/index.js'
-import { loadEmbeddedLibMpvAddon } from '../dist/index.js'
 
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux', 'win32'])
 const OPERATION_TIMEOUT_MS = 20_000
@@ -161,17 +160,21 @@ async function waitForSessionStates(expectedSessionIds) {
   )
 }
 
-async function waitForPlaying(runtimeSessionId, options = {}) {
+async function waitForPlaying(record, options = {}) {
   const minimumGeneration = options.minimumGeneration ?? 1
   const expectedStreamUrl = options.expectedStreamUrl ?? null
   const deadline = Date.now() + OPERATION_TIMEOUT_MS
   let lastSnapshot = null
 
   while (Date.now() < deadline) {
-    lastSnapshot = await client.invoke('getSessionSnapshot', runtimeSessionId)
+    lastSnapshot = await client.invokeInGeneration(
+      record.runtimeGeneration,
+      'getSessionSnapshot',
+      record.runtimeSessionId
+    )
     if (lastSnapshot?.status === 'error') {
       throw new Error(
-        `Session ${runtimeSessionId} entered an error state: ${lastSnapshot.error ?? '(no detail)'}`
+        `Session ${record.runtimeSessionId} entered an error state: ${lastSnapshot.error ?? '(no detail)'}`
       )
     }
     if (
@@ -186,7 +189,7 @@ async function waitForPlaying(runtimeSessionId, options = {}) {
   }
 
   throw new Error(
-    `Session ${runtimeSessionId} did not reach playing state. Last snapshot: ${JSON.stringify(
+    `Session ${record.runtimeSessionId} did not reach playing state. Last snapshot: ${JSON.stringify(
       lastSnapshot
     )}`
   )
@@ -194,23 +197,39 @@ async function waitForPlaying(runtimeSessionId, options = {}) {
 
 async function loadSource(record, fixturePath, title) {
   log(`${record.presenterId}: loading source`)
-  await client.invoke('loadPlayback', record.runtimeSessionId, {
-    streamUrl: fixturePath,
-    title
-  })
+  await client.invokeInGeneration(
+    record.runtimeGeneration,
+    'loadPlayback',
+    record.runtimeSessionId,
+    {
+      streamUrl: fixturePath,
+      title
+    }
+  )
   log(`${record.presenterId}: source loaded; configuring playback`)
-  await client.invoke('setLoopFile', record.runtimeSessionId, true)
-  await client.invoke('setPaused', record.runtimeSessionId, false)
+  await client.invokeInGeneration(
+    record.runtimeGeneration,
+    'setLoopFile',
+    record.runtimeSessionId,
+    true
+  )
+  await client.invokeInGeneration(
+    record.runtimeGeneration,
+    'setPaused',
+    record.runtimeSessionId,
+    false
+  )
   log(`${record.presenterId}: playback configured`)
 }
 
 async function createPlaybackSession(presenterId, bounds, fixturePath) {
   log(`${presenterId}: creating runtime session`)
-  const { sessionId: runtimeSessionId, videoWindowHandle } = await client.invoke('createSession', {
-    options: { volume: 0 }
-  })
+  const {
+    generation: runtimeGeneration,
+    result: { sessionId: runtimeSessionId }
+  } = await client.invokeWithGeneration('createSession', { options: { volume: 0 } })
   log(`${presenterId}: runtime session ${runtimeSessionId} created`)
-  const record = { presenterId, runtimeSessionId, presenterCreated: false }
+  const record = { presenterId, runtimeGeneration, runtimeSessionId, presenterCreated: false }
 
   try {
     log(`${presenterId}: creating presenter`)
@@ -220,32 +239,34 @@ async function createPlaybackSession(presenterId, bounds, fixturePath) {
             ...bounds,
             zOrder: 'overlay'
           })
-        : host.createPresenter(presenterId, browserWindow.getNativeWindowHandle(), {
-            ...bounds,
-            zOrder: 'overlay'
-          })
+        : await host.createPresenter(
+            presenterId,
+            runtimeGeneration,
+            runtimeSessionId,
+            browserWindow.getNativeWindowHandle(),
+            {
+              ...bounds,
+              zOrder: 'overlay'
+            }
+          )
     log(`${presenterId}: presenter created`)
     record.presenterCreated = true
     livePresenters.add(presenterId)
 
-    if (host.presentationKind === 'window') {
-      assert.ok(
-        Number.isSafeInteger(videoWindowHandle) && videoWindowHandle > 0,
-        `Window session ${runtimeSessionId} returned an invalid child handle: ${String(
-          videoWindowHandle
-        )}`
-      )
-      log(`${presenterId}: adopting child window ${String(videoWindowHandle)}`)
-      host.adoptVideoWindow(presenterId, videoWindowHandle)
-      log(`${presenterId}: child window adopted`)
+    if (host.presentationKind === 'layer') {
+      log(`${presenterId}: binding runtime session to layer presenter`)
+      host.bindSessionToPresenter(runtimeSessionId, presenterId)
+      log(`${presenterId}: runtime session bound to layer presenter`)
     }
-    log(`${presenterId}: binding runtime session to presenter`)
-    host.bindSessionToPresenter(runtimeSessionId, presenterId)
-    log(`${presenterId}: runtime session bound to presenter`)
 
-    if (renderSize.widthPixels > 0 && renderSize.heightPixels > 0) {
+    if (
+      host.presentationKind === 'layer' &&
+      renderSize.widthPixels > 0 &&
+      renderSize.heightPixels > 0
+    ) {
       log(`${presenterId}: setting render size`)
-      await client.invoke(
+      await client.invokeInGeneration(
+        runtimeGeneration,
         'setRenderSize',
         runtimeSessionId,
         renderSize.widthPixels,
@@ -259,14 +280,14 @@ async function createPlaybackSession(presenterId, bounds, fixturePath) {
     const failures = [error]
     if (record.presenterCreated) {
       try {
-        host.destroyPresenter(presenterId)
+        await host.destroyPresenter(presenterId)
         livePresenters.delete(presenterId)
       } catch (cleanupError) {
         failures.push(cleanupError)
       }
     }
     try {
-      await client.invoke('disposeSession', runtimeSessionId)
+      await client.invokeInGeneration(runtimeGeneration, 'disposeSession', runtimeSessionId)
     } catch (cleanupError) {
       failures.push(cleanupError)
     }
@@ -278,17 +299,23 @@ async function createPlaybackSession(presenterId, bounds, fixturePath) {
 }
 
 async function assertCapturedFrame(record) {
-  const frame = await client.invoke('captureFrame', record.runtimeSessionId)
+  const frame = await client.invokeInGeneration(
+    record.runtimeGeneration,
+    'captureFrame',
+    record.runtimeSessionId
+  )
   assert.ok(frame, `Session ${record.runtimeSessionId} returned no captured frame.`)
   assert.ok(frame.widthPixels > 0 && frame.heightPixels > 0)
   assert.equal(frame.data.length, frame.widthPixels * frame.heightPixels * 4)
 }
 
-function releasePresenter(record) {
+async function releasePresenter(record, runtimeLost = false) {
   if (!record.presenterCreated) {
     return
   }
-  host.destroyPresenter(record.presenterId)
+  if (host.presentationKind === 'layer' || !runtimeLost) {
+    await host.destroyPresenter(record.presenterId)
+  }
   record.presenterCreated = false
   livePresenters.delete(record.presenterId)
 }
@@ -296,12 +323,16 @@ function releasePresenter(record) {
 async function disposePlaybackSession(record) {
   const failures = []
   try {
-    releasePresenter(record)
+    await releasePresenter(record)
   } catch (error) {
     failures.push(error)
   }
   try {
-    await client.invoke('disposeSession', record.runtimeSessionId)
+    await client.invokeInGeneration(
+      record.runtimeGeneration,
+      'disposeSession',
+      record.runtimeSessionId
+    )
   } catch (error) {
     failures.push(error)
   }
@@ -329,8 +360,8 @@ async function run() {
   log('starting crash-isolated playback host')
   if (process.env.EMPV_SMOKE_ADDON_PATH) {
     // The existing cross-platform native smokes use this diagnostic override.
-    // Normalize it to the public runtime resolver key so both the main-process
-    // presenter and every playback-process generation load the exact same addon.
+    // Normalize it to the public runtime resolver key. Window backends load it
+    // only in the isolated runtime; layer also loads its presenter facet in main.
     process.env.EMPV_ADDON_PATH = path.resolve(process.env.EMPV_SMOKE_ADDON_PATH)
   }
   const frameLinkServiceName = createEmpvFrameLinkServiceName()
@@ -353,17 +384,9 @@ async function run() {
   })
   host = await createEmpvPlaybackHost({
     client,
-    frameLinkServiceName,
-    onWarmUpFailed: (error) => {
-      log(`playback utility warm-up failed: ${errorText(error)}`)
-    },
-    loadAddon: async () => {
-      log('playback utility warm-up settled; loading presenter addon in Electron main')
-      const loaded = await loadEmbeddedLibMpvAddon()
-      log('presenter addon loaded in Electron main')
-      return loaded
-    }
+    frameLinkServiceName
   })
+  log(`runtime backend probed as ${host.presentationKind}; playback host ready`)
 
   const first = await createPlaybackSession(
     'empv-smoke-presenter-1',
@@ -378,10 +401,10 @@ async function run() {
   assert.notEqual(first.runtimeSessionId, second.runtimeSessionId)
 
   const [firstSnapshot, secondSnapshot] = await Promise.all([
-    waitForPlaying(first.runtimeSessionId, {
+    waitForPlaying(first, {
       expectedStreamUrl: firstFixturePath
     }),
-    waitForPlaying(second.runtimeSessionId, {
+    waitForPlaying(second, {
       expectedStreamUrl: secondFixturePath
     })
   ])
@@ -394,12 +417,16 @@ async function run() {
   )
 
   await disposePlaybackSession(first)
-  const secondBefore = await waitForPlaying(second.runtimeSessionId, {
+  const secondBefore = await waitForPlaying(second, {
     minimumGeneration: secondSnapshot.playbackReadyGeneration,
     expectedStreamUrl: secondFixturePath
   })
   await sleep(350)
-  const secondAfter = await client.invoke('getSessionSnapshot', second.runtimeSessionId)
+  const secondAfter = await client.invokeInGeneration(
+    second.runtimeGeneration,
+    'getSessionSnapshot',
+    second.runtimeSessionId
+  )
   assert.ok(secondAfter)
   assert.ok(
     secondAfter.positionSeconds > secondBefore.positionSeconds,
@@ -414,11 +441,18 @@ async function run() {
   const lostGeneration = await runtimeExit
   assert.equal(lostGeneration.error.terminalReason.type, 'unexpected-exit')
   assert.deepEqual(lostGeneration.sessions, [
-    { sessionId: second.runtimeSessionId, state: 'active' }
+    {
+      sessionId: second.runtimeSessionId,
+      state: 'active',
+      windowPresenter:
+        host.presentationKind === 'window'
+          ? { presenterId: second.presenterId, state: 'active' }
+          : null
+    }
   ])
   assert.equal(client.getProcessId(), null)
   assert.equal(browserWindow.isDestroyed(), false)
-  releasePresenter(second)
+  await releasePresenter(second, true)
   log(
     `playback pid ${String(runtimePid)} was killed; Electron and BrowserWindow survived generation ${String(
       lostGeneration.error.generation
@@ -436,13 +470,13 @@ async function run() {
     'A fresh playback generation should demonstrate raw native session-id reuse.'
   )
   assert.notEqual(restarted.presenterId, first.presenterId)
-  const restartedSnapshot = await waitForPlaying(restarted.runtimeSessionId, {
+  const restartedSnapshot = await waitForPlaying(restarted, {
     expectedStreamUrl: firstFixturePath
   })
   await assertCapturedFrame(restarted)
 
   await loadSource(restarted, secondFixturePath, 'consecutive source replacement')
-  const replacedSnapshot = await waitForPlaying(restarted.runtimeSessionId, {
+  const replacedSnapshot = await waitForPlaying(restarted, {
     expectedStreamUrl: secondFixturePath,
     minimumGeneration: restartedSnapshot.playbackReadyGeneration + 1
   })
@@ -460,7 +494,7 @@ async function run() {
   await disposePlaybackSession(restarted)
   assert.equal(livePresenters.size, 0)
   await waitForSessionStates([])
-  host.dispose()
+  await host.dispose()
   hostDisposed = true
 
   const finalExit = waitForNextExit()
@@ -477,7 +511,7 @@ async function cleanup() {
 
   if (host && !hostDisposed) {
     try {
-      host.dispose()
+      await host.dispose()
       hostDisposed = true
       livePresenters.clear()
     } catch (error) {

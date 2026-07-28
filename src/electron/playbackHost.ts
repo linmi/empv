@@ -14,23 +14,17 @@ import type { EmpvRuntimeClient } from './client.ts'
 // The main-process half of a crash-isolated player, and the piece a consumer is
 // most likely to get wrong when handed the parts separately.
 //
-// Playing one video correctly takes four things to agree: the addon has to be
-// loaded in THIS process (for the presenter), a mach service name has to be
-// registered here and handed to the playback process at spawn, every session has
-// to be paired with a presenter, and every frame event has to be turned into a
-// presentSurface call with its four arguments in the right order. Nothing checks
-// any of that at compile time, and getting it wrong produces a black rectangle
-// with no error anywhere. So it lives here instead: the host mints the service
-// name, registers it, loads the addon, and presents frames for whatever sessions
-// are currently bound.
+// The host probes the isolated runtime and exposes one discriminated presenter
+// facet. On macOS it loads the layer addon in main, registers the mach frame
+// link and routes bound frame events. On Windows/Linux it never loads native
+// code in main: every presenter operation is a generation-pinned runtime RPC.
 //
 // This module deliberately does not import ./client.ts -- that would pull
 // `electron` in and make the host unloadable (and untestable) outside a real
 // main process. The client is handed in already built.
 //
-// The host is created lazily, when a presenter is first needed: building it
-// loads the addon in this process, and a consumer that only wants to ask the
-// utility whether playback is supported should not pay for that.
+// The host is created lazily. Building a window host only probes the runtime;
+// building a layer host additionally loads the main-process presenter facet.
 
 export type EmpvPlaybackHostOptions = {
   // The client driving the playback process. It must have been created with the
@@ -43,25 +37,19 @@ export type EmpvPlaybackHostOptions = {
   // consumer that wants to see the failures gets them here rather than through a
   // logger this package would have to choose.
   onPresentFailed?: (error: unknown, sessionId: string) => void
-  // Reported when the first-load warm-up failed. That step is a performance
-  // measure, not a correctness one (see below), so it is swallowed and surfaced
-  // rather than thrown.
-  onWarmUpFailed?: (error: unknown) => void
-  // The impure boundary, injectable for tests. Production gets
-  // loadEmbeddedLibMpvAddon.
+  // Layer-only impure boundary, injectable for tests. Window presentation never
+  // calls it: loading empv.node/libmpv in Electron main would defeat crash
+  // isolation even if every session stayed in the runtime process.
   loadAddon?: () => Promise<LoadedEmbeddedLibMpvAddon>
 }
 
-type EmpvPlaybackHostCore = {
+type EmpvLayerHostCore = {
   readonly client: EmpvRuntimeClient
   readonly frameLinkServiceName: string
   // Pairs a session with the presenter its frames belong on. Until a session is
   // bound its frames are dropped: there is nowhere to put them, and presenting
   // onto a stale presenter is worse than showing nothing.
   bindSessionToPresenter(sessionId: string, presenterId: string): void
-  // --- Presenter API, main process only ---
-  // createPresenter lives on each facet, not here: the backends take different
-  // attach options and an intersection cannot narrow what the core declares.
   setPresenterBounds(presenterId: string, bounds: LibMpvVideoLayerBounds): LibMpvRenderSize
   refreshPresenterScale(presenterId: string): LibMpvRenderSize
   setPresenterSuspended(presenterId: string, suspended: boolean): void
@@ -79,7 +67,7 @@ type EmpvPlaybackHostCore = {
 
 // The two facets stay disjoint here exactly as they are on the addon: a caller
 // branches on presentationKind to reach the half that exists.
-export type EmpvLayerHost = EmpvPlaybackHostCore & {
+export type EmpvLayerHost = EmpvLayerHostCore & {
   readonly presentationKind: 'layer'
   createPresenter(
     presenterId: string,
@@ -90,17 +78,25 @@ export type EmpvLayerHost = EmpvPlaybackHostCore & {
   unobserveWindowOcclusion(windowHandle: Buffer): void
 }
 
-export type EmpvWindowHost = EmpvPlaybackHostCore & {
+export type EmpvWindowHost = {
+  readonly client: EmpvRuntimeClient
+  readonly frameLinkServiceName: string
   readonly presentationKind: 'window'
-  // Overlay only: this backend reparents an OS child window, which composites
-  // above the web contents. The addon refuses 'underlay'; this refuses it at
-  // compile time.
+  // Window presentation is a generation-bound runtime transaction. The
+  // generation and session id must come from one invokeWithGeneration result so
+  // a raw id can never be rebound to whichever runtime happens to be current.
   createPresenter(
     presenterId: string,
+    generation: number,
+    sessionId: string,
     windowHandle: Buffer,
     options: LibMpvWindowAttachOptions
-  ): LibMpvRenderSize
-  adoptVideoWindow(presenterId: string, childWindowHandle: number): void
+  ): Promise<LibMpvRenderSize>
+  setPresenterBounds(presenterId: string, bounds: LibMpvVideoLayerBounds): Promise<LibMpvRenderSize>
+  refreshPresenterScale(presenterId: string): Promise<LibMpvRenderSize>
+  setPresenterSuspended(presenterId: string, suspended: boolean): Promise<void>
+  destroyPresenter(presenterId: string): Promise<void>
+  dispose(): Promise<void>
 }
 
 export type EmpvPlaybackHost = EmpvLayerHost | EmpvWindowHost
@@ -112,24 +108,223 @@ export function createEmpvFrameLinkServiceName(): string {
   return `empv.frame-link.${process.pid}.${randomBytes(6).toString('hex')}`
 }
 
-// Loading the addon ends in a synchronous dlopen. On macOS the kernel validates
-// the code signature of the addon and its vendored dylib chain on the first load
-// after the binary changes, and caches the result per inode ACROSS processes.
-// Doing that first load on the main thread stalls it for seconds on a freshly
-// built binary -- long enough to beachball the UI and trip utility watchdogs. So
-// the playback process is asked a trivial question first: it loads the addon
-// there, and the load here lands on a warm cache.
-//
-// This is a performance step, NOT a fallback. Its failure is reported and
-// swallowed; the real load below still happens and still throws.
-async function warmSignatureCache(
+type WindowPresenterRecord = {
+  presenterId: string
+  sessionId: string
+  generation: number
+  state: 'creating' | 'active' | 'disposing' | 'cleanup-required'
+  creation: Promise<LibMpvRenderSize>
+  tail: Promise<void>
+  destruction: Promise<void> | null
+}
+
+function createWindowPlaybackHost(
   client: EmpvRuntimeClient,
-  onWarmUpFailed?: (error: unknown) => void
-): Promise<void> {
-  try {
-    await client.invoke('isSupported')
-  } catch (error) {
-    onWarmUpFailed?.(error)
+  frameLinkServiceName: string
+): EmpvWindowHost {
+  const presenters = new Map<string, WindowPresenterRecord>()
+  let lifecycle: 'open' | 'disposing' | 'cleanup-required' | 'disposed' = 'open'
+  let disposePromise: Promise<void> | null = null
+
+  function assertOpen(operation: string): void {
+    if (lifecycle === 'disposed') {
+      throw new Error(`Cannot ${operation}: the empv playback host is disposed.`)
+    }
+    if (lifecycle !== 'open') {
+      throw new Error(
+        `Cannot ${operation}: the empv playback host lifecycle is ${lifecycle}; only dispose may continue cleanup.`
+      )
+    }
+  }
+
+  function requirePresenter(presenterId: string, operation: string): WindowPresenterRecord {
+    const record = presenters.get(presenterId)
+    if (!record) {
+      throw new Error(`Cannot ${operation}: empv window presenter ${presenterId} does not exist.`)
+    }
+    if ((record.state !== 'creating' && record.state !== 'active') || record.destruction) {
+      throw new Error(
+        `Cannot ${operation}: empv window presenter ${presenterId} is ${record.state}${record.destruction ? ' with destruction already scheduled' : ''}.`
+      )
+    }
+    return record
+  }
+
+  function enqueue<Value>(
+    record: WindowPresenterRecord,
+    operation: () => Promise<Value>
+  ): Promise<Value> {
+    const result = record.tail.then(async () => {
+      if (presenters.get(record.presenterId) !== record) {
+        throw new Error(
+          `Cannot continue empv window presenter ${record.presenterId}: its runtime generation ownership has ended.`
+        )
+      }
+      return operation()
+    })
+    record.tail = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
+  function destroyRecord(record: WindowPresenterRecord): Promise<void> {
+    if (record.destruction) return record.destruction
+
+    const destruction = enqueue(record, async () => {
+      record.state = 'disposing'
+      try {
+        await client.invokeInGeneration(
+          record.generation,
+          'destroyWindowPresenter',
+          record.presenterId
+        )
+      } catch (error) {
+        if (presenters.get(record.presenterId) === record) {
+          record.state = 'cleanup-required'
+          record.destruction = null
+        }
+        throw error
+      }
+      if (presenters.get(record.presenterId) === record) {
+        presenters.delete(record.presenterId)
+      }
+    })
+    record.destruction = destruction
+    return destruction
+  }
+
+  // A process-generation exit is itself the cleanup boundary for window
+  // presenters: their HWND/X11 resources belonged to that process and are gone.
+  // Clearing local ownership is deliberately side-effect free; invoking here
+  // would spawn a new generation and could target a reused raw native id.
+  const removeExitListener = client.onExit(() => {
+    presenters.clear()
+  })
+
+  return {
+    client,
+    frameLinkServiceName,
+    presentationKind: 'window',
+    createPresenter(presenterId, generation, sessionId, windowHandle, attachOptions) {
+      assertOpen('create a presenter')
+      if (presenters.has(presenterId)) {
+        throw new Error(`Cannot create duplicate empv window presenter ${presenterId}.`)
+      }
+      if (!Number.isSafeInteger(generation) || generation < 1) {
+        throw new Error(
+          `Cannot create empv window presenter ${presenterId}: runtime generation must be a positive safe integer, received ${String(generation)}.`
+        )
+      }
+
+      const record: WindowPresenterRecord = {
+        presenterId,
+        sessionId,
+        generation,
+        state: 'creating',
+        creation: Promise.resolve({ widthPixels: 0, heightPixels: 0 }),
+        tail: Promise.resolve(),
+        destruction: null
+      }
+      presenters.set(presenterId, record)
+
+      record.creation = client
+        .invokeInGeneration(generation, 'createWindowPresenter', {
+          presenterId,
+          sessionId,
+          parentWindowHandle: windowHandle,
+          options: attachOptions
+        })
+        .then(
+          (renderSize) => {
+            if (presenters.get(presenterId) !== record) {
+              throw new Error(
+                `Empv window presenter ${presenterId} was created after runtime generation ${generation} ownership ended.`
+              )
+            }
+            record.state = 'active'
+            return renderSize
+          },
+          (error: unknown) => {
+            if (presenters.get(presenterId) === record) presenters.delete(presenterId)
+            throw error
+          }
+        )
+      record.tail = record.creation.then(
+        () => undefined,
+        () => undefined
+      )
+      return record.creation
+    },
+    setPresenterBounds(presenterId, bounds) {
+      assertOpen('set presenter bounds')
+      const record = requirePresenter(presenterId, 'set presenter bounds')
+      return enqueue(record, () =>
+        client.invokeInGeneration(
+          record.generation,
+          'setWindowPresenterBounds',
+          presenterId,
+          bounds
+        )
+      )
+    },
+    refreshPresenterScale(presenterId) {
+      assertOpen('refresh presenter scale')
+      const record = requirePresenter(presenterId, 'refresh presenter scale')
+      return enqueue(record, () =>
+        client.invokeInGeneration(record.generation, 'refreshWindowPresenterScale', presenterId)
+      )
+    },
+    setPresenterSuspended(presenterId, suspended) {
+      assertOpen('set presenter suspension')
+      const record = requirePresenter(presenterId, 'set presenter suspension')
+      return enqueue(record, () =>
+        client.invokeInGeneration(
+          record.generation,
+          'setWindowPresenterSuspended',
+          presenterId,
+          suspended
+        )
+      )
+    },
+    destroyPresenter(presenterId) {
+      assertOpen('destroy a presenter')
+      const record = presenters.get(presenterId)
+      if (!record) {
+        throw new Error(
+          `Cannot destroy a presenter: empv window presenter ${presenterId} does not exist.`
+        )
+      }
+      return destroyRecord(record)
+    },
+    dispose() {
+      if (lifecycle === 'disposed') return Promise.resolve()
+      if (lifecycle === 'disposing' && disposePromise) return disposePromise
+      lifecycle = 'disposing'
+
+      disposePromise = (async () => {
+        const failures: unknown[] = []
+        const pendingCreations = [...presenters.values()].map((record) => record.creation)
+        await Promise.allSettled(pendingCreations)
+
+        const owned = [...presenters.values()]
+        const results = await Promise.allSettled(owned.map((record) => destroyRecord(record)))
+        for (const result of results) {
+          if (result.status === 'rejected') failures.push(result.reason)
+        }
+
+        if (failures.length > 0) {
+          lifecycle = 'cleanup-required'
+          throw new AggregateError(failures, 'Failed to dispose the empv window playback host.')
+        }
+        removeExitListener()
+        lifecycle = 'disposed'
+      })()
+      return disposePromise.finally(() => {
+        if (lifecycle === 'cleanup-required') disposePromise = null
+      })
+    }
   }
 }
 
@@ -137,11 +332,28 @@ export async function createEmpvPlaybackHost(
   options: EmpvPlaybackHostOptions
 ): Promise<EmpvPlaybackHost> {
   const { client, frameLinkServiceName } = options
+  const probe = await client.invoke('probe')
+  if (!probe.supported) {
+    throw new Error(
+      `The empv runtime reports that ${probe.presentationKind} presentation is unsupported in this environment.`
+    )
+  }
+  if (probe.presentationKind === 'window') {
+    return createWindowPlaybackHost(client, frameLinkServiceName)
+  }
+
   const loadAddon = options.loadAddon ?? loadEmbeddedLibMpvAddon
-
-  await warmSignatureCache(client, options.onWarmUpFailed)
-
   const loaded = await loadAddon()
+  if (loaded.presentationKind !== probe.presentationKind) {
+    throw new Error(
+      `The empv runtime reports ${probe.presentationKind} presentation, but the Electron main addon reports ${loaded.presentationKind}; refusing to join mismatched native backends.`
+    )
+  }
+  if (loaded.presentationKind !== 'layer') {
+    throw new Error(
+      `The empv window backend must remain isolated in the runtime process; refusing to load it in Electron main.`
+    )
+  }
   const { addon } = loaded
 
   // The mach frame-link receiver only exists on 'layer'. 'window'
@@ -154,7 +366,7 @@ export async function createEmpvPlaybackHost(
   let lifecycle: 'open' | 'disposing' | 'cleanup-required' | 'disposed' = 'open'
   let removeFrameListener = (): void => {}
   let frameListenerRemoved = false
-  let presenterLinkStopped = loaded.presentationKind !== 'layer'
+  let presenterLinkStopped = false
 
   function assertOpen(operation: string): void {
     if (lifecycle === 'disposed') {
@@ -192,39 +404,37 @@ export async function createEmpvPlaybackHost(
     }
   }
 
-  if (loaded.presentationKind === 'layer') {
-    const machAddon = loaded.addon
-    machAddon.startPresenterLink(frameLinkServiceName)
-    try {
-      removeFrameListener = client.onFrame((event) => {
-        const presenterId = presenterBySession.get(event.sessionId)
-        if (presenterId === undefined) return
+  const machAddon = loaded.addon
+  machAddon.startPresenterLink(frameLinkServiceName)
+  try {
+    removeFrameListener = client.onFrame((event) => {
+      const presenterId = presenterBySession.get(event.sessionId)
+      if (presenterId === undefined) return
 
-        try {
-          machAddon.presentSurface(
-            presenterId,
-            event.poolGeneration,
-            event.surfaceIndex,
-            event.contentGeneration
-          )
-        } catch (error) {
-          options.onPresentFailed?.(error, event.sessionId)
-        }
-      })
-    } catch (error) {
       try {
-        machAddon.stopPresenterLink()
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          'Failed to subscribe the empv frame listener and stop the presenter link during rollback.'
+        machAddon.presentSurface(
+          presenterId,
+          event.poolGeneration,
+          event.surfaceIndex,
+          event.contentGeneration
         )
+      } catch (error) {
+        options.onPresentFailed?.(error, event.sessionId)
       }
-      throw error
+    })
+  } catch (error) {
+    try {
+      machAddon.stopPresenterLink()
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        'Failed to subscribe the empv frame listener and stop the presenter link during rollback.'
+      )
     }
+    throw error
   }
 
-  const core: EmpvPlaybackHostCore = {
+  const core: EmpvLayerHostCore = {
     client,
     frameLinkServiceName,
     bindSessionToPresenter(sessionId, presenterId) {
@@ -315,7 +525,7 @@ export async function createEmpvPlaybackHost(
           failures.push(error)
         }
       }
-      if (loaded.presentationKind === 'layer' && !presenterLinkStopped) {
+      if (!presenterLinkStopped) {
         try {
           loaded.addon.stopPresenterLink()
           presenterLinkStopped = true
@@ -332,38 +542,20 @@ export async function createEmpvPlaybackHost(
     }
   }
 
-  if (loaded.presentationKind === 'layer') {
-    const machAddon = loaded.addon
-    return {
-      ...core,
-      presentationKind: 'layer',
-      createPresenter: (presenterId, windowHandle, attachOptions) =>
-        createTrackedPresenter(presenterId, () =>
-          machAddon.createPresenter(presenterId, windowHandle, attachOptions)
-        ),
-      observeWindowOcclusion: (windowHandle, onChange) => {
-        assertOpen('observe window occlusion')
-        machAddon.observeWindowOcclusion(windowHandle, onChange)
-      },
-      unobserveWindowOcclusion: (windowHandle) => {
-        assertOpen('stop observing window occlusion')
-        machAddon.unobserveWindowOcclusion(windowHandle)
-      }
-    }
-  }
-
-  const widAddon = loaded.addon
   return {
     ...core,
-    presentationKind: 'window',
+    presentationKind: 'layer',
     createPresenter: (presenterId, windowHandle, attachOptions) =>
       createTrackedPresenter(presenterId, () =>
-        widAddon.createPresenter(presenterId, windowHandle, attachOptions)
+        machAddon.createPresenter(presenterId, windowHandle, attachOptions)
       ),
-    adoptVideoWindow: (presenterId, childWindowHandle) => {
-      assertOpen('adopt a video window')
-      requirePresenter(presenterId, 'adopt a video window')
-      widAddon.adoptVideoWindow(presenterId, childWindowHandle)
+    observeWindowOcclusion: (windowHandle, onChange) => {
+      assertOpen('observe window occlusion')
+      machAddon.observeWindowOcclusion(windowHandle, onChange)
+    },
+    unobserveWindowOcclusion: (windowHandle) => {
+      assertOpen('stop observing window occlusion')
+      machAddon.unobserveWindowOcclusion(windowHandle)
     }
   }
 }

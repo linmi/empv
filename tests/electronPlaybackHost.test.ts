@@ -11,6 +11,20 @@ import { makeFakeRuntimeClient } from './support/fakeClient.ts'
 
 const WINDOW_HANDLE = Buffer.from([1, 2, 3, 4])
 
+function createDeferred<Value>(): {
+  promise: Promise<Value>
+  resolve: (value: Value) => void
+} {
+  let resolve: ((value: Value) => void) | null = null
+  const promise = new Promise<Value>((promiseResolve) => {
+    resolve = promiseResolve
+  })
+  if (!resolve) {
+    throw new Error('Failed to initialize playback host test deferred.')
+  }
+  return { promise, resolve }
+}
+
 describe('createEmpvPlaybackHost', () => {
   test('hands the client the same frame-link name it registers with the addon', async () => {
     const fakeClient = makeFakeRuntimeClient()
@@ -31,38 +45,37 @@ describe('createEmpvPlaybackHost', () => {
     assert.deepEqual(registration.args, [frameLinkServiceName])
   })
 
-  test('does not register a mach link for a backend that has no link', async () => {
-    const fakeClient = makeFakeRuntimeClient()
+  test('keeps a window backend entirely out of Electron main', async () => {
+    const fakeClient = makeFakeRuntimeClient({ presentationKind: 'window' })
     const { loaded, calls } = makeWindowAddon()
+    let mainLoads = 0
 
     const host = await createEmpvPlaybackHost({
       client: fakeClient.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => loaded
+      loadAddon: async () => {
+        mainLoads += 1
+        return loaded
+      }
     })
 
     assert.equal(host.presentationKind, 'window')
-    assert.equal(
-      calls.some((call) => call.method === 'startPresenterLink'),
-      false
-    )
+    assert.equal(mainLoads, 0)
+    assert.deepEqual(calls, [])
   })
 
-  // The addon's first load validates code signatures and blocks whatever thread
-  // does it. Asking the playback process something trivial first makes that load
-  // happen there, so the main-process load lands on a warm kernel cache.
-  test('warms the playback process before loading the addon in this one', async () => {
+  test('probes the real runtime backend before loading the layer addon in main', async () => {
     const { loaded } = makeLayerAddon()
     const order: string[] = []
-    const warming = makeFakeRuntimeClient({
+    const probing = makeFakeRuntimeClient({
       invoke: (method) => {
         order.push(`utility:${method}`)
-        return true
+        return { presentationKind: 'layer', supported: true }
       }
     })
 
     await createEmpvPlaybackHost({
-      client: warming.client,
+      client: probing.client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
       loadAddon: async () => {
         order.push('main:loadAddon')
@@ -70,33 +83,63 @@ describe('createEmpvPlaybackHost', () => {
       }
     })
 
-    assert.deepEqual(order, ['utility:isSupported', 'main:loadAddon'])
+    assert.deepEqual(order, ['utility:probe', 'main:loadAddon'])
   })
 
-  test('reports a failed warm-up but still loads the addon', async () => {
-    const failures: unknown[] = []
+  test('fails explicitly when runtime probing fails and never loads main native code', async () => {
     const { loaded } = makeLayerAddon()
     let loadedInMain = false
 
-    const host = await createEmpvPlaybackHost({
-      client: makeFakeRuntimeClient({
-        invoke: () => {
-          throw new Error('utility is not up')
+    await assert.rejects(
+      createEmpvPlaybackHost({
+        client: makeFakeRuntimeClient({
+          invoke: () => {
+            throw new Error('utility is not up')
+          }
+        }).client,
+        frameLinkServiceName: createEmpvFrameLinkServiceName(),
+        loadAddon: async () => {
+          loadedInMain = true
+          return loaded
         }
-      }).client,
-      frameLinkServiceName: createEmpvFrameLinkServiceName(),
-      loadAddon: async () => {
-        loadedInMain = true
-        return loaded
-      },
-      onWarmUpFailed: (error) => failures.push(error)
+      }),
+      /utility is not up/
+    )
+    assert.equal(loadedInMain, false)
+  })
+
+  test('rejects an unsupported runtime backend without loading native code in main', async () => {
+    let loadedInMain = false
+    const fakeClient = makeFakeRuntimeClient({
+      invoke: (method) => {
+        assert.equal(method, 'probe')
+        return { presentationKind: 'window', supported: false }
+      }
     })
 
-    // The warm-up is a performance step. Its failure must not become the
-    // player's failure, but it must not vanish either.
-    assert.equal(loadedInMain, true)
-    assert.equal(failures.length, 1)
-    assert.equal(host.presentationKind, 'layer')
+    await assert.rejects(
+      createEmpvPlaybackHost({
+        client: fakeClient.client,
+        frameLinkServiceName: createEmpvFrameLinkServiceName(),
+        loadAddon: async () => {
+          loadedInMain = true
+          return makeWindowAddon().loaded
+        }
+      }),
+      /window presentation is unsupported/
+    )
+    assert.equal(loadedInMain, false)
+  })
+
+  test('rejects a runtime/main backend mismatch', async () => {
+    await assert.rejects(
+      createEmpvPlaybackHost({
+        client: makeFakeRuntimeClient().client,
+        frameLinkServiceName: createEmpvFrameLinkServiceName(),
+        loadAddon: async () => makeWindowAddon().loaded
+      }),
+      /runtime reports layer.*main addon reports window/
+    )
   })
 
   test('stops a newly-started layer link when frame subscription fails', async () => {
@@ -581,6 +624,194 @@ describe('createEmpvPlaybackHost', () => {
     assert.equal(calls.filter((call) => call.method === 'stopPresenterLink').length, 1)
   })
 
+  test('routes the complete window presenter lifecycle through its pinned runtime generation', async () => {
+    const fakeClient = makeFakeRuntimeClient({
+      presentationKind: 'window',
+      invoke: (method) => {
+        if (method === 'probe') return { presentationKind: 'window', supported: true }
+        if (
+          method === 'createWindowPresenter' ||
+          method === 'setWindowPresenterBounds' ||
+          method === 'refreshWindowPresenterScale'
+        ) {
+          return { widthPixels: 640, heightPixels: 360 }
+        }
+        return undefined
+      }
+    })
+    const host = await createEmpvPlaybackHost({
+      client: fakeClient.client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName(),
+      loadAddon: async () => {
+        throw new Error('window host must not load main native code')
+      }
+    })
+    assert.equal(host.presentationKind, 'window')
+
+    const options = { x: 1, y: 2, width: 320, height: 180, zOrder: 'overlay' as const }
+    assert.deepEqual(
+      await host.createPresenter('presenter-1', 37, 'session-1', WINDOW_HANDLE, options),
+      { widthPixels: 640, heightPixels: 360 }
+    )
+    await host.setPresenterBounds('presenter-1', { x: 2, y: 3, width: 640, height: 360 })
+    await host.refreshPresenterScale('presenter-1')
+    await host.setPresenterSuspended('presenter-1', true)
+    await host.destroyPresenter('presenter-1')
+
+    assert.deepEqual(
+      fakeClient.invocations.map((invocation) => invocation.method),
+      [
+        'probe',
+        'createWindowPresenter',
+        'setWindowPresenterBounds',
+        'refreshWindowPresenterScale',
+        'setWindowPresenterSuspended',
+        'destroyWindowPresenter'
+      ]
+    )
+    const create = fakeClient.invocations[1]
+    assert.ok(create)
+    assert.equal((create.args[0] as { sessionId: string }).sessionId, 'session-1')
+    assert.equal(
+      (create.args[0] as { parentWindowHandle: Uint8Array }).parentWindowHandle,
+      WINDOW_HANDLE
+    )
+    assert.deepEqual(
+      fakeClient.generationInvocations.map((invocation) => invocation.generation),
+      [37, 37, 37, 37, 37]
+    )
+  })
+
+  test('orders concurrent window presenter operations and closes the queue at destruction', async () => {
+    const creationGate = createDeferred<{ widthPixels: number; heightPixels: number }>()
+    const fakeClient = makeFakeRuntimeClient({
+      presentationKind: 'window',
+      invoke: (method) => {
+        if (method === 'probe') return { presentationKind: 'window', supported: true }
+        if (method === 'createWindowPresenter') return creationGate.promise
+        if (method === 'setWindowPresenterBounds') {
+          return { widthPixels: 800, heightPixels: 450 }
+        }
+        return undefined
+      }
+    })
+    const host = await createEmpvPlaybackHost({
+      client: fakeClient.client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName()
+    })
+    assert.equal(host.presentationKind, 'window')
+
+    const creation = host.createPresenter('presenter-1', 73, 'session-1', WINDOW_HANDLE, {
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 180,
+      zOrder: 'overlay'
+    })
+    const bounds = host.setPresenterBounds('presenter-1', {
+      x: 2,
+      y: 3,
+      width: 800,
+      height: 450
+    })
+    const suspended = host.setPresenterSuspended('presenter-1', true)
+    const destroyed = host.destroyPresenter('presenter-1')
+
+    assert.throws(() => host.refreshPresenterScale('presenter-1'), /destruction already scheduled/)
+    assert.deepEqual(
+      fakeClient.invocations.map(({ method }) => method),
+      ['probe', 'createWindowPresenter']
+    )
+
+    creationGate.resolve({ widthPixels: 320, heightPixels: 180 })
+    assert.deepEqual(await creation, { widthPixels: 320, heightPixels: 180 })
+    assert.deepEqual(await bounds, { widthPixels: 800, heightPixels: 450 })
+    await suspended
+    await destroyed
+
+    assert.deepEqual(
+      fakeClient.invocations.map(({ method }) => method),
+      [
+        'probe',
+        'createWindowPresenter',
+        'setWindowPresenterBounds',
+        'setWindowPresenterSuspended',
+        'destroyWindowPresenter'
+      ]
+    )
+    assert.deepEqual(
+      fakeClient.generationInvocations.map(({ generation }) => generation),
+      [73, 73, 73, 73]
+    )
+  })
+
+  test('retains failed window presenter cleanup ownership and retries native destruction', async () => {
+    let destroyAttempts = 0
+    const fakeClient = makeFakeRuntimeClient({
+      presentationKind: 'window',
+      invoke: (method) => {
+        if (method === 'probe') return { presentationKind: 'window', supported: true }
+        if (method === 'createWindowPresenter') {
+          return { widthPixels: 320, heightPixels: 180 }
+        }
+        if (method === 'destroyWindowPresenter' && ++destroyAttempts === 1) {
+          throw new Error('transient request rejection')
+        }
+        return undefined
+      }
+    })
+    const host = await createEmpvPlaybackHost({
+      client: fakeClient.client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName()
+    })
+    assert.equal(host.presentationKind, 'window')
+    await host.createPresenter('presenter-1', 41, 'session-1', WINDOW_HANDLE, {
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 180,
+      zOrder: 'overlay'
+    })
+
+    await assert.rejects(host.destroyPresenter('presenter-1'), /transient request rejection/)
+    assert.throws(
+      () => host.setPresenterBounds('presenter-1', { x: 0, y: 0, width: 1, height: 1 }),
+      /cleanup-required/
+    )
+    await host.destroyPresenter('presenter-1')
+    assert.equal(destroyAttempts, 2)
+  })
+
+  test('forgets window presenters on runtime exit without spawning cleanup work', async () => {
+    const fakeClient = makeFakeRuntimeClient({
+      presentationKind: 'window',
+      invoke: (method) =>
+        method === 'probe'
+          ? { presentationKind: 'window', supported: true }
+          : { widthPixels: 1, heightPixels: 1 }
+    })
+    const host = await createEmpvPlaybackHost({
+      client: fakeClient.client,
+      frameLinkServiceName: createEmpvFrameLinkServiceName()
+    })
+    assert.equal(host.presentationKind, 'window')
+    await host.createPresenter('presenter-1', 19, 'session-1', WINDOW_HANDLE, {
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+      zOrder: 'overlay'
+    })
+    const invocationsBeforeExit = fakeClient.invocations.length
+
+    fakeClient.emitExit()
+
+    assert.throws(() => host.destroyPresenter('presenter-1'), /does not exist/)
+    assert.equal(fakeClient.invocations.length, invocationsBeforeExit)
+    await host.dispose()
+    assert.equal(fakeClient.invocations.length, invocationsBeforeExit)
+  })
+
   test('exposes only the presenter facet its backend actually has', async () => {
     const layerHost = await createEmpvPlaybackHost({
       client: makeFakeRuntimeClient().client,
@@ -588,7 +819,7 @@ describe('createEmpvPlaybackHost', () => {
       loadAddon: async () => makeLayerAddon().loaded
     })
     const windowHost = await createEmpvPlaybackHost({
-      client: makeFakeRuntimeClient().client,
+      client: makeFakeRuntimeClient({ presentationKind: 'window' }).client,
       frameLinkServiceName: createEmpvFrameLinkServiceName(),
       loadAddon: async () => makeWindowAddon().loaded
     })
@@ -599,9 +830,11 @@ describe('createEmpvPlaybackHost', () => {
       assert.equal(typeof layerHost.observeWindowOcclusion, 'function')
     }
     if (windowHost.presentationKind === 'window') {
-      assert.equal(typeof windowHost.adoptVideoWindow, 'function')
+      assert.equal(typeof windowHost.createPresenter, 'function')
     }
     assert.equal('adoptVideoWindow' in layerHost, false)
+    assert.equal('adoptVideoWindow' in windowHost, false)
+    assert.equal('bindSessionToPresenter' in windowHost, false)
     assert.equal('observeWindowOcclusion' in windowHost, false)
   })
 })

@@ -11,11 +11,20 @@ const heartbeat = setInterval(() => {
     type: 'runtime.heartbeat',
     pid: process.pid,
     sentAt: Date.now(),
-    sessions: [{ sessionId: 'smoke-session', state: 'disposing' }]
+    sessions: [{ sessionId: 'smoke-session', state: 'disposing', windowPresenter: null }]
   })
 }, 50)
 
 parentPort.on('message', ({ data }) => {
+  if (data.method === 'createSession') {
+    parentPort.postMessage({
+      id: data.id,
+      type: 'done',
+      result: { sessionId: 'smoke-session' }
+    })
+    return
+  }
+
   if (data.method === 'disposeSession') {
     // Deliberately keep heartbeating without settling this request. This is the
     // fault the smoke verifies: liveness is not request completion.

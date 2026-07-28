@@ -2,13 +2,18 @@ import { existsSync } from 'node:fs'
 
 import {
   EMPV_FRAME_LINK_ENV_KEY,
+  EMPV_RUNTIME_SESSION_CREATE_METHOD,
+  EMPV_RUNTIME_UNOWNED_METHODS,
   type EmpvRuntimeArgs,
   type EmpvRuntimeEvent,
   type EmpvRuntimeMethod,
+  type EmpvRuntimeOwnedMethod,
   type EmpvRuntimeRequest,
   type EmpvRuntimeResponse,
   type EmpvRuntimeResult,
-  type EmpvRuntimeSessionState
+  type EmpvRuntimeSessionCreateMethod,
+  type EmpvRuntimeSessionState,
+  type EmpvRuntimeUnownedMethod
 } from './protocol.ts'
 
 export type EmpvRuntimeSnapshotEvent = Extract<EmpvRuntimeEvent, { type: 'session.snapshot' }>
@@ -121,8 +126,28 @@ export type EmpvRuntimeClientOptions = {
   onDiagnostic?: (diagnostic: EmpvRuntimeClientDiagnostic) => void
 }
 
+export type EmpvRuntimeInvocation<Method extends EmpvRuntimeMethod> = {
+  generation: number
+  result: EmpvRuntimeResult<Method>
+}
+
 export type EmpvRuntimeClient = {
-  invoke<Method extends EmpvRuntimeMethod>(
+  invoke<Method extends EmpvRuntimeUnownedMethod>(
+    method: Method,
+    ...args: EmpvRuntimeArgs<Method>
+  ): Promise<EmpvRuntimeResult<Method>>
+  // Session owners need the generation and result from one response boundary.
+  // Reading "the current generation" after awaiting a request is racy because
+  // that generation may exit between the response and the later read.
+  invokeWithGeneration<Method extends EmpvRuntimeSessionCreateMethod>(
+    method: Method,
+    ...args: EmpvRuntimeArgs<Method>
+  ): Promise<EmpvRuntimeInvocation<Method>>
+  // Cleanup and presenter mutations must never respawn and accidentally target
+  // a raw id reused by a later process generation. This variant only sends when
+  // the exact generation is still current and running.
+  invokeInGeneration<Method extends EmpvRuntimeOwnedMethod>(
+    generation: number,
     method: Method,
     ...args: EmpvRuntimeArgs<Method>
   ): Promise<EmpvRuntimeResult<Method>>
@@ -274,6 +299,7 @@ export function createEmpvRuntimeClientWithFork(
   }
 
   const stdioPrefix = options.stdioPrefix ?? '[empv-runtime]'
+  const unownedMethods = new Set<string>(EMPV_RUNTIME_UNOWNED_METHODS)
 
   let currentGeneration: Generation | null = null
   let nextGenerationId = 1
@@ -417,7 +443,10 @@ export function createEmpvRuntimeClientWithFork(
       return
     }
     if (message.type === 'runtime.heartbeat') {
-      generation.sessions = message.sessions.map((session) => ({ ...session }))
+      generation.sessions = message.sessions.map((session) => ({
+        ...session,
+        windowPresenter: session.windowPresenter ? { ...session.windowPresenter } : null
+      }))
       if (options.onHeartbeat) {
         runCallback(generation, 'onHeartbeat', options.onHeartbeat)
       }
@@ -438,7 +467,8 @@ export function createEmpvRuntimeClientWithFork(
     if (currentGeneration !== generation || generation.state === 'stopped') return
 
     const stoppedSessions = generation.sessions.map((session) => ({
-      ...session
+      ...session,
+      windowPresenter: session.windowPresenter ? { ...session.windowPresenter } : null
     }))
     const reason = generation.terminalReason ?? { type: 'unexpected-exit' }
     beginTerminal(generation, reason, code, signal)
@@ -454,7 +484,10 @@ export function createEmpvRuntimeClientWithFork(
       runCallback(generation, 'exit-listener', () =>
         listener(
           finalError,
-          stoppedSessions.map((session) => ({ ...session }))
+          stoppedSessions.map((session) => ({
+            ...session,
+            windowPresenter: session.windowPresenter ? { ...session.windowPresenter } : null
+          }))
         )
       )
     }
@@ -590,108 +623,152 @@ export function createEmpvRuntimeClientWithFork(
     return generation.spawnPromise
   }
 
-  return {
-    invoke(method, ...args) {
-      const id = nextRequestId++
-      const spawnPromise = spawn()
-
-      return new Promise((resolve, reject) => {
-        let settled = false
-        let generation: Generation | null = null
-        const settleResolve = (result: unknown): void => {
-          if (settled) return
-          settled = true
-          resolve(result as never)
-        }
-        const settleReject = (error: Error): void => {
-          if (settled) return
-          settled = true
-          reject(error)
-        }
-        const timeout = setTimeout(() => {
-          if (settled) return
-
-          const timedOutGeneration = generation ?? currentGeneration
-          if (!timedOutGeneration) {
-            settleReject(
+  function invokeRequest<Method extends EmpvRuntimeMethod>(
+    expectedGenerationId: number | null,
+    method: Method,
+    args: EmpvRuntimeArgs<Method>
+  ): Promise<EmpvRuntimeInvocation<Method>> {
+    const id = nextRequestId++
+    const spawnPromise =
+      expectedGenerationId === null
+        ? spawn()
+        : currentGeneration?.id === expectedGenerationId && currentGeneration.state === 'running'
+          ? Promise.resolve(currentGeneration)
+          : Promise.reject(
               new Error(
-                `empv runtime request ${method} (#${id}) timed out before a runtime generation could be created.`
+                `Cannot send empv runtime request ${method} in generation ${expectedGenerationId}: that generation is no longer current and running.`
               )
+            )
+
+    return new Promise((resolve, reject) => {
+      let settled = false
+      let generation: Generation | null = null
+      const settleResolve = (result: unknown, resultGeneration: number): void => {
+        if (settled) return
+        settled = true
+        resolve({
+          generation: resultGeneration,
+          result: result as EmpvRuntimeResult<Method>
+        })
+      }
+      const settleReject = (error: Error): void => {
+        if (settled) return
+        settled = true
+        reject(error)
+      }
+      const timeout = setTimeout(() => {
+        if (settled) return
+
+        const timedOutGeneration = generation ?? currentGeneration
+        if (!timedOutGeneration) {
+          settleReject(
+            new Error(
+              `empv runtime request ${method} (#${id}) timed out before a runtime generation could be created.`
+            )
+          )
+          return
+        }
+
+        const reason: EmpvRuntimeTerminalReason = {
+          type: 'request-timeout',
+          requestId: id,
+          method,
+          sessionId: requestSessionId(args),
+          timeoutMs: options.requestTimeoutMs
+        }
+        const terminalError = beginTerminal(timedOutGeneration, reason)
+        killGeneration(timedOutGeneration)
+        settleReject(terminalError)
+      }, options.requestTimeoutMs)
+
+      void spawnPromise.then(
+        (spawnedGeneration) => {
+          generation = spawnedGeneration
+          if (settled) return
+          if (
+            currentGeneration !== spawnedGeneration ||
+            spawnedGeneration.state !== 'running' ||
+            spawnedGeneration.terminalError
+          ) {
+            clearTimeout(timeout)
+            settleReject(
+              spawnedGeneration.terminalError ??
+                new Error(
+                  `empv runtime generation ${spawnedGeneration.id} is not accepting requests.`
+                )
             )
             return
           }
 
-          const reason: EmpvRuntimeTerminalReason = {
-            type: 'request-timeout',
-            requestId: id,
+          spawnedGeneration.pendingRequests.set(id, {
             method,
             sessionId: requestSessionId(args),
-            timeoutMs: options.requestTimeoutMs
-          }
-          const terminalError = beginTerminal(timedOutGeneration, reason)
-          killGeneration(timedOutGeneration)
-          settleReject(terminalError)
-        }, options.requestTimeoutMs)
-
-        void spawnPromise.then(
-          (spawnedGeneration) => {
-            generation = spawnedGeneration
-            if (settled) return
-            if (
-              currentGeneration !== spawnedGeneration ||
-              spawnedGeneration.state !== 'running' ||
-              spawnedGeneration.terminalError
-            ) {
-              clearTimeout(timeout)
-              settleReject(
-                spawnedGeneration.terminalError ??
-                  new Error(
-                    `empv runtime generation ${spawnedGeneration.id} is not accepting requests.`
-                  )
-              )
+            resolve: (result) => settleResolve(result, spawnedGeneration.id),
+            reject: settleReject,
+            timeout
+          })
+          const request = {
+            id,
+            method,
+            args
+          } as EmpvRuntimeRequest
+          const handleSendFailure = (error: Error): void => {
+            if (currentGeneration !== spawnedGeneration || spawnedGeneration.state === 'stopped') {
               return
             }
-
-            spawnedGeneration.pendingRequests.set(id, {
+            beginTerminal(spawnedGeneration, {
+              type: 'request-send-failure',
+              requestId: id,
               method,
               sessionId: requestSessionId(args),
-              resolve: settleResolve,
-              reject: settleReject,
-              timeout
+              message: error.message
             })
-            const request = {
-              id,
-              method,
-              args
-            } as EmpvRuntimeRequest
-            const handleSendFailure = (error: Error): void => {
-              if (
-                currentGeneration !== spawnedGeneration ||
-                spawnedGeneration.state === 'stopped'
-              ) {
-                return
-              }
-              beginTerminal(spawnedGeneration, {
-                type: 'request-send-failure',
-                requestId: id,
-                method,
-                sessionId: requestSessionId(args),
-                message: error.message
-              })
-              killGeneration(spawnedGeneration)
-            }
-            try {
-              spawnedGeneration.child.postMessage(request, handleSendFailure)
-            } catch (error) {
-              handleSendFailure(toError(error))
-            }
-          },
-          (error: unknown) => {
-            clearTimeout(timeout)
-            settleReject(toError(error))
+            killGeneration(spawnedGeneration)
           }
+          try {
+            spawnedGeneration.child.postMessage(request, handleSendFailure)
+          } catch (error) {
+            handleSendFailure(toError(error))
+          }
+        },
+        (error: unknown) => {
+          clearTimeout(timeout)
+          settleReject(toError(error))
+        }
+      )
+    })
+  }
+
+  return {
+    invoke(method, ...args) {
+      if (!unownedMethods.has(method)) {
+        return Promise.reject(
+          new Error(
+            `Empv runtime method ${method} owns generation-scoped state and cannot use invoke; create sessions with invokeWithGeneration and send owned requests with invokeInGeneration.`
+          )
         )
-      })
+      }
+      return invokeRequest(null, method, args).then(({ result }) => result)
+    },
+    invokeWithGeneration(method, ...args) {
+      if (method !== EMPV_RUNTIME_SESSION_CREATE_METHOD) {
+        return Promise.reject(
+          new Error(
+            `Empv runtime method ${method} cannot use invokeWithGeneration; only createSession establishes new generation-scoped ownership.`
+          )
+        )
+      }
+      return invokeRequest(null, method, args)
+    },
+    invokeInGeneration(generation, method, ...args) {
+      if (unownedMethods.has(method) || (method as string) === EMPV_RUNTIME_SESSION_CREATE_METHOD) {
+        return Promise.reject(
+          new Error(
+            `Empv runtime method ${method} does not target existing generation-scoped ownership and cannot use invokeInGeneration.`
+          )
+        )
+      }
+      return invokeRequest(generation, method, args).then(({ result }) => result)
     },
     onSnapshot(listener) {
       snapshotListeners.add(listener)
@@ -709,7 +786,12 @@ export function createEmpvRuntimeClientWithFork(
       return currentGeneration?.state === 'running' ? (currentGeneration.child.pid ?? null) : null
     },
     getSessionStates() {
-      return currentGeneration ? currentGeneration.sessions.map((session) => ({ ...session })) : []
+      return currentGeneration
+        ? currentGeneration.sessions.map((session) => ({
+            ...session,
+            windowPresenter: session.windowPresenter ? { ...session.windowPresenter } : null
+          }))
+        : []
     },
     terminate(reason) {
       try {

@@ -8,6 +8,7 @@ import {
   createEmpvRuntimeClientWithFork,
   EmpvRuntimeProcessFailure,
   type EmpvRuntimeChildProcess,
+  type EmpvRuntimeClient,
   type EmpvRuntimeClientDiagnostic,
   type EmpvRuntimeClientOptions,
   type EmpvRuntimeProcessFork,
@@ -124,6 +125,23 @@ async function flush(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve))
 }
 
+async function createOwnedSession(
+  harness: ReturnType<typeof makeHarness>,
+  sessionId = 'session-a'
+): Promise<number> {
+  const creation = harness.client.invokeWithGeneration('createSession', {
+    options: { volume: 1 }
+  })
+  const child = harness.children.at(-1)
+  assert.ok(child)
+  child.spawn()
+  await flush()
+  const request = child.posted.at(-1)
+  assert.ok(request)
+  child.message({ id: request.id, type: 'done', result: { sessionId } })
+  return (await creation).generation
+}
+
 describe('createEmpvRuntimeClient', () => {
   test('rejects a missing or invalid request deadline before spawning', () => {
     for (const requestTimeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
@@ -134,10 +152,28 @@ describe('createEmpvRuntimeClient', () => {
     }
   })
 
+  test('rejects generation-unsafe API combinations at runtime before spawning', async () => {
+    const { children, client } = makeHarness()
+
+    await assert.rejects(
+      Reflect.apply(client.invoke, client, ['setVolume', 'session-1', 0.5]),
+      /owns generation-scoped state.*invokeInGeneration/
+    )
+    await assert.rejects(
+      Reflect.apply(client.invokeWithGeneration, client, ['isSupported']),
+      /only createSession establishes/
+    )
+    await assert.rejects(
+      Reflect.apply(client.invokeInGeneration, client, [1, 'isSupported']),
+      /does not target existing generation-scoped ownership/
+    )
+    assert.equal(children.length, 0)
+  })
+
   test('shares one spawn across concurrent invokes and correlates out-of-order responses', async () => {
     const { children, client, forkCalls } = makeHarness()
     const first = client.invoke('isSupported')
-    const second = client.invoke('setVolume', 'session-1', 0.5)
+    const second = client.invoke('probe')
 
     assert.equal(forkCalls.length, 1)
     children[0].spawn()
@@ -146,14 +182,18 @@ describe('createEmpvRuntimeClient', () => {
       children[0].posted.map(({ id, method }) => ({ id, method })),
       [
         { id: 1, method: 'isSupported' },
-        { id: 2, method: 'setVolume' }
+        { id: 2, method: 'probe' }
       ]
     )
 
-    children[0].message({ id: 2, type: 'done', result: undefined })
+    children[0].message({
+      id: 2,
+      type: 'done',
+      result: { presentationKind: 'window', supported: true }
+    })
     children[0].message({ id: 1, type: 'done', result: true })
     assert.equal(await first, true)
-    assert.equal(await second, undefined)
+    assert.deepEqual(await second, { presentationKind: 'window', supported: true })
   })
 
   test('preserves a fatal error as the terminal cause through the final exit code', async () => {
@@ -185,18 +225,19 @@ describe('createEmpvRuntimeClient', () => {
 
   test('terminates the generation for synchronous and asynchronous IPC send failures', async () => {
     for (const failureMode of ['throw', 'callback'] as const) {
-      const { children, client } = makeHarness()
-      const pending = client.invoke('setVolume', 'session-a', 0.5)
+      const harness = makeHarness()
+      const { children, client } = harness
+      const generation = await createOwnedSession(harness)
       const sendError = new Error(`${failureMode} send failed`)
       if (failureMode === 'throw') children[0].sendThrow = sendError
       else children[0].sendError = sendError
-      children[0].spawn()
+      const pending = client.invokeInGeneration(generation, 'setVolume', 'session-a', 0.5)
 
       await assert.rejects(pending, (error: unknown) => {
         assert.ok(error instanceof EmpvRuntimeProcessFailure)
         assert.deepEqual(error.terminalReason, {
           type: 'request-send-failure',
-          requestId: 1,
+          requestId: 2,
           method: 'setVolume',
           sessionId: 'session-a',
           message: `${failureMode} send failed`
@@ -234,23 +275,24 @@ describe('createEmpvRuntimeClient', () => {
       error: EmpvRuntimeProcessFailure
       sessions: ReturnType<ReturnType<typeof makeHarness>['client']['getSessionStates']>
     }> = []
-    const { children, client } = makeHarness()
+    const harness = makeHarness()
+    const { children, client } = harness
     client.onExit((error, sessions) => exits.push({ error, sessions }))
-    const disposal = client.invoke('disposeSession', 'session-a')
-    const concurrent = client.invoke('setVolume', 'session-b', 0.5)
-    children[0].spawn()
+    const generation = await createOwnedSession(harness)
+    const disposal = client.invokeInGeneration(generation, 'disposeSession', 'session-a')
+    const concurrent = client.invokeInGeneration(generation, 'setVolume', 'session-b', 0.5)
     await flush()
     children[0].message({
       type: 'runtime.heartbeat',
       pid: 4_000,
       sentAt: 1,
       sessions: [
-        { sessionId: 'session-a', state: 'disposing' },
-        { sessionId: 'session-b', state: 'active' }
+        { sessionId: 'session-a', state: 'disposing', windowPresenter: null },
+        { sessionId: 'session-b', state: 'active', windowPresenter: null }
       ]
     })
     children[0].message({
-      id: 1,
+      id: 2,
       type: 'error',
       name: 'EmpvRuntimeGenerationFailure',
       message: 'native teardown failed after registry removal',
@@ -264,7 +306,7 @@ describe('createEmpvRuntimeClient', () => {
     assert.equal(concurrentResult.reason, disposalResult.reason)
     assert.deepEqual(disposalResult.reason.terminalReason, {
       type: 'runtime-failure',
-      requestId: 1,
+      requestId: 2,
       method: 'disposeSession',
       sessionId: 'session-a',
       errorName: 'EmpvRuntimeGenerationFailure',
@@ -280,8 +322,8 @@ describe('createEmpvRuntimeClient', () => {
     assert.equal(exits.length, 1)
     assert.equal(exits[0]?.error.terminalReason.type, 'runtime-failure')
     assert.deepEqual(exits[0]?.sessions, [
-      { sessionId: 'session-a', state: 'disposing' },
-      { sessionId: 'session-b', state: 'active' }
+      { sessionId: 'session-a', state: 'disposing', windowPresenter: null },
+      { sessionId: 'session-b', state: 'active', windowPresenter: null }
     ])
   })
 
@@ -371,11 +413,12 @@ describe('createEmpvRuntimeClient', () => {
 
   test('terminates the generation when a request hangs despite live heartbeats', async () => {
     const exits: EmpvRuntimeProcessFailure[] = []
-    const { children, client } = makeHarness({ requestTimeoutMs: 40 })
+    const harness = makeHarness({ requestTimeoutMs: 40 })
+    const { children, client } = harness
     client.onExit((error) => exits.push(error))
-    const timedOut = client.invoke('disposeSession', 'session-a')
-    const concurrent = client.invoke('setVolume', 'session-b', 0.5)
-    children[0].spawn()
+    const generation = await createOwnedSession(harness)
+    const timedOut = client.invokeInGeneration(generation, 'disposeSession', 'session-a')
+    const concurrent = client.invokeInGeneration(generation, 'setVolume', 'session-b', 0.5)
     await flush()
 
     children[0].message({
@@ -405,7 +448,7 @@ describe('createEmpvRuntimeClient', () => {
     assert.equal(concurrentResult.reason, timedOutResult.reason)
     assert.deepEqual(timedOutResult.reason.terminalReason, {
       type: 'request-timeout',
-      requestId: 1,
+      requestId: 2,
       method: 'disposeSession',
       sessionId: 'session-a',
       timeoutMs: 40
@@ -413,8 +456,8 @@ describe('createEmpvRuntimeClient', () => {
     assert.equal(children[0].killCalls, 1)
 
     // A late reply cannot revive the request or make this generation invokable.
-    children[0].message({ id: 1, type: 'done', result: undefined })
-    await assert.rejects(client.invoke('isSupported'), /did not answer disposeSession request #1/)
+    children[0].message({ id: 2, type: 'done', result: undefined })
+    await assert.rejects(client.invoke('isSupported'), /did not answer disposeSession request #2/)
     children[0].exit(143)
     assert.equal(exits[0].terminalReason.type, 'request-timeout')
     assert.equal(exits[0].exitCode, 143)
@@ -422,7 +465,7 @@ describe('createEmpvRuntimeClient', () => {
 
   test('applies the same deadline while the runtime process is still spawning', async () => {
     const { children, client } = makeHarness({ requestTimeoutMs: 20 })
-    const pending = client.invoke('createSession', { options: { volume: 1 } })
+    const pending = client.invokeWithGeneration('createSession', { options: { volume: 1 } })
 
     await assert.rejects(pending, (error: unknown) => {
       assert.ok(error instanceof EmpvRuntimeProcessFailure)
@@ -456,7 +499,7 @@ describe('createEmpvRuntimeClient', () => {
       type: 'runtime.heartbeat',
       pid: 4_000,
       sentAt: 1,
-      sessions: [{ sessionId: 'old-session', state: 'active' }]
+      sessions: [{ sessionId: 'old-session', state: 'active', windowPresenter: null }]
     })
     children[0].exit(9)
     await assert.rejects(first)
@@ -469,7 +512,7 @@ describe('createEmpvRuntimeClient', () => {
       type: 'runtime.heartbeat',
       pid: 4_001,
       sentAt: 2,
-      sessions: [{ sessionId: 'new-session', state: 'active' }]
+      sessions: [{ sessionId: 'new-session', state: 'active', windowPresenter: null }]
     })
 
     children[0].message({ id: secondRequestId, type: 'done', result: false })
@@ -477,14 +520,40 @@ describe('createEmpvRuntimeClient', () => {
       type: 'runtime.heartbeat',
       pid: 4_000,
       sentAt: 3,
-      sessions: [{ sessionId: 'stale-session', state: 'active' }]
+      sessions: [{ sessionId: 'stale-session', state: 'active', windowPresenter: null }]
     })
     children[0].exit(10)
-    assert.deepEqual(client.getSessionStates(), [{ sessionId: 'new-session', state: 'active' }])
+    assert.deepEqual(client.getSessionStates(), [
+      { sessionId: 'new-session', state: 'active', windowPresenter: null }
+    ])
     assert.equal(exits.length, 1)
 
     children[1].message({ id: secondRequestId, type: 'done', result: true })
     assert.equal(await second, true)
+  })
+
+  test('never respawns when a cleanup request is pinned to an exited generation', async () => {
+    const { children, client } = makeHarness()
+    const first = client.invokeWithGeneration('createSession', { options: { volume: 1 } })
+    children[0].spawn()
+    await flush()
+    children[0].message({
+      id: children[0].posted[0].id,
+      type: 'done',
+      result: { sessionId: 'session-1' }
+    })
+    // The response and its owning generation are one atomic result even when
+    // that generation exits before the caller's continuation runs.
+    children[0].exit(9)
+    const { generation, result } = await first
+    assert.equal(generation, 1)
+    assert.deepEqual(result, { sessionId: 'session-1' })
+
+    await assert.rejects(
+      client.invokeInGeneration(generation, 'destroyWindowPresenter', 'presenter-1'),
+      /generation 1.*no longer current and running/
+    )
+    assert.equal(children.length, 1, 'Pinned cleanup must not fork a replacement generation.')
   })
 
   test('contains callback and listener throws while notifying every listener and cleaning up', async () => {
@@ -536,4 +605,20 @@ describe('createEmpvRuntimeClient', () => {
       ['onSpawn', 'onHeartbeat', 'snapshot-listener', 'onStopped', 'exit-listener']
     )
   })
+})
+
+type Expect<T extends true> = T
+type UnownedInvokeRejectsSessionMethods = Expect<
+  'setVolume' extends Parameters<EmpvRuntimeClient['invoke']>[0] ? false : true
+>
+type SessionCreationReturnsGeneration = Expect<
+  Parameters<EmpvRuntimeClient['invokeWithGeneration']>[0] extends 'createSession' ? true : false
+>
+
+test('the client type surface makes generation ownership mandatory', () => {
+  const proofs: [UnownedInvokeRejectsSessionMethods, SessionCreationReturnsGeneration] = [
+    true,
+    true
+  ]
+  assert.deepEqual(proofs, [true, true])
 })

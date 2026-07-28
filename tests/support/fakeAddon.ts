@@ -5,6 +5,8 @@ import type {
   LibMpvRenderSize,
   LibMpvSessionOptions,
   LibMpvSessionSnapshot,
+  LibMpvVideoLayerAttachOptions,
+  LibMpvVideoLayerBounds,
   LibMpvWindowAddon,
   LoadedEmbeddedLibMpvAddon
 } from '../../src/embedded.ts'
@@ -25,9 +27,16 @@ export type FakeAddonOverrides = {
   ) => Promise<string>
   disposeSession?: (sessionId: string) => Promise<void>
   seek?: (sessionId: string, seconds: number) => void
+  setRenderSize?: (sessionId: string, widthPixels: number, heightPixels: number) => void
+  setPresentationSuspended?: (sessionId: string, suspended: boolean) => void
   getSessionSnapshot?: (sessionId: string) => LibMpvSessionSnapshot | null
   getVideoWindowHandle?: (sessionId: string) => number | null
   presentSurface?: () => void
+  createPresenter?: (presenterId: string) => LibMpvRenderSize
+  adoptVideoWindow?: (presenterId: string, childWindowHandle: number) => void
+  setPresenterBounds?: (presenterId: string) => LibMpvRenderSize
+  refreshPresenterScale?: (presenterId: string) => LibMpvRenderSize
+  setPresenterSuspended?: (presenterId: string, suspended: boolean) => void
   destroyPresenter?: (presenterId: string) => void
 }
 
@@ -98,8 +107,14 @@ function makeCore(calls: AddonCall[], overrides: FakeAddonOverrides) {
       calls.push({ method: 'captureFrame', args: [sessionId] })
       return null
     },
-    setRenderSize: note('setRenderSize'),
-    setPresentationSuspended: note('setPresentationSuspended'),
+    setRenderSize: (sessionId: string, widthPixels: number, heightPixels: number): void => {
+      calls.push({ method: 'setRenderSize', args: [sessionId, widthPixels, heightPixels] })
+      overrides.setRenderSize?.(sessionId, widthPixels, heightPixels)
+    },
+    setPresentationSuspended: (sessionId: string, suspended: boolean): void => {
+      calls.push({ method: 'setPresentationSuspended', args: [sessionId, suspended] })
+      overrides.setPresentationSuspended?.(sessionId, suspended)
+    },
     reloadSubtitle: note('reloadSubtitle'),
     seek: (sessionId: string, seconds: number): void => {
       calls.push({ method: 'seek', args: [sessionId, seconds] })
@@ -130,19 +145,26 @@ function makeCore(calls: AddonCall[], overrides: FakeAddonOverrides) {
     setVolume: note('setVolume'),
     startRecording: note('startRecording'),
     stopRecording: note('stopRecording'),
-    createPresenter: (): LibMpvRenderSize => {
-      calls.push({ method: 'createPresenter', args: [] })
-      return RENDER_SIZE
+    createPresenter: (
+      presenterId: string,
+      windowHandle: Buffer,
+      options: LibMpvVideoLayerAttachOptions
+    ): LibMpvRenderSize => {
+      calls.push({ method: 'createPresenter', args: [presenterId, windowHandle, options] })
+      return overrides.createPresenter?.(presenterId) ?? RENDER_SIZE
     },
-    setPresenterBounds: (): LibMpvRenderSize => {
-      calls.push({ method: 'setPresenterBounds', args: [] })
-      return RENDER_SIZE
+    setPresenterBounds: (presenterId: string, bounds: LibMpvVideoLayerBounds): LibMpvRenderSize => {
+      calls.push({ method: 'setPresenterBounds', args: [presenterId, bounds] })
+      return overrides.setPresenterBounds?.(presenterId) ?? RENDER_SIZE
     },
-    refreshPresenterScale: (): LibMpvRenderSize => {
-      calls.push({ method: 'refreshPresenterScale', args: [] })
-      return RENDER_SIZE
+    refreshPresenterScale: (presenterId: string): LibMpvRenderSize => {
+      calls.push({ method: 'refreshPresenterScale', args: [presenterId] })
+      return overrides.refreshPresenterScale?.(presenterId) ?? RENDER_SIZE
     },
-    setPresenterSuspended: note('setPresenterSuspended'),
+    setPresenterSuspended: (presenterId: string, suspended: boolean): void => {
+      calls.push({ method: 'setPresenterSuspended', args: [presenterId, suspended] })
+      overrides.setPresenterSuspended?.(presenterId, suspended)
+    },
     destroyPresenter: (presenterId: string): void => {
       calls.push({ method: 'destroyPresenter', args: [presenterId] })
       overrides.destroyPresenter?.(presenterId)
@@ -178,11 +200,6 @@ export function makeLayerAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'l
 
 export function makeWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'window'> {
   const calls: AddonCall[] = []
-  const note =
-    (method: string) =>
-    (...args: unknown[]): void => {
-      calls.push({ method, args })
-    }
 
   const addon: LibMpvWindowAddon = {
     ...makeCore(calls, overrides),
@@ -191,7 +208,10 @@ export function makeWindowAddon(overrides: FakeAddonOverrides = {}): FakeAddon<'
       calls.push({ method: 'getVideoWindowHandle', args: [sessionId] })
       return overrides.getVideoWindowHandle ? overrides.getVideoWindowHandle(sessionId) : 4242
     },
-    adoptVideoWindow: note('adoptVideoWindow')
+    adoptVideoWindow: (presenterId, childWindowHandle) => {
+      calls.push({ method: 'adoptVideoWindow', args: [presenterId, childWindowHandle] })
+      overrides.adoptVideoWindow?.(presenterId, childWindowHandle)
+    }
   }
 
   return { calls, loaded: { presentationKind: 'window', addon, runtime: FAKE_RUNTIME } }

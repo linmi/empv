@@ -52,22 +52,28 @@ async function run() {
   })
 
   const firstExit = waitForNextExit(client)
-  await assert.rejects(client.invoke('disposeSession', 'smoke-session'), (error) => {
-    assert.ok(error instanceof EmpvRuntimeProcessFailure)
-    assert.deepEqual(error.terminalReason, {
-      type: 'request-timeout',
-      requestId: 1,
-      method: 'disposeSession',
-      sessionId: 'smoke-session',
-      timeoutMs: REQUEST_TIMEOUT_MS
-    })
-    return true
+  const { generation } = await client.invokeWithGeneration('createSession', {
+    options: { volume: 1 }
   })
+  await assert.rejects(
+    client.invokeInGeneration(generation, 'disposeSession', 'smoke-session'),
+    (error) => {
+      assert.ok(error instanceof EmpvRuntimeProcessFailure)
+      assert.deepEqual(error.terminalReason, {
+        type: 'request-timeout',
+        requestId: 2,
+        method: 'disposeSession',
+        sessionId: 'smoke-session',
+        timeoutMs: REQUEST_TIMEOUT_MS
+      })
+      return true
+    }
+  )
 
   const timedOutGeneration = await firstExit
   assert.equal(timedOutGeneration.error.terminalReason.type, 'request-timeout')
   assert.deepEqual(timedOutGeneration.sessions, [
-    { sessionId: 'smoke-session', state: 'disposing' }
+    { sessionId: 'smoke-session', state: 'disposing', windowPresenter: null }
   ])
   assert.deepEqual(diagnostics, [])
   log('heartbeat-alive request timeout terminated generation 1 without terminating Electron')

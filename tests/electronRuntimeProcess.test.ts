@@ -303,10 +303,7 @@ describe('startEmpvRuntimeProcess', () => {
     assert.match(String(reply?.message), new RegExp(EMPV_FRAME_LINK_ENV_KEY))
   })
 
-  // 'window' renders into an OS window the utility owns, so its handle has to
-  // reach the main process for reparenting. 'layer' has no such window
-  // and must not invent one.
-  test('reports a video window handle only for the backend that has one', async () => {
+  test('keeps the window handle private to the runtime create result', async () => {
     const layerPort = makeFakeParentPort()
     setFrameLinkServiceName('test.frame.link')
     const layer = makeLayerAddon()
@@ -325,18 +322,15 @@ describe('startEmpvRuntimeProcess', () => {
     await sleep(20)
     const [layerReply] = layerPort.posted.filter((message) => message.id === 1)
     assert.ok(layerReply, 'The mach backend never answered sessions.create.')
-    assert.equal(
-      (layerReply.result as { videoWindowHandle: number | null }).videoWindowHandle,
-      null
-    )
+    assert.equal('videoWindowHandle' in (layerReply.result as object), false)
     assert.deepEqual(
       layerPort
         .postedOfType('runtime.heartbeat')
         .map((message) => message.sessions)
         .filter((sessions) => Array.isArray(sessions) && sessions.length > 0),
       [
-        [{ sessionId: 'session-1', state: 'creating' }],
-        [{ sessionId: 'session-1', state: 'active' }]
+        [{ sessionId: 'session-1', state: 'creating', windowPresenter: null }],
+        [{ sessionId: 'session-1', state: 'active', windowPresenter: null }]
       ]
     )
 
@@ -357,9 +351,314 @@ describe('startEmpvRuntimeProcess', () => {
     await sleep(20)
     const [windowReply] = windowPort.posted.filter((message) => message.id === 2)
     assert.ok(windowReply, 'The wid backend never answered sessions.create.')
+    assert.equal('videoWindowHandle' in (windowReply.result as object), false)
     assert.equal(
-      (windowReply.result as { videoWindowHandle: number | null }).videoWindowHandle,
-      4242
+      windowBackend.calls.filter((call) => call.method === 'getVideoWindowHandle').length,
+      1,
+      'Window creation must still prove an adoptable child exists inside the runtime.'
+    )
+  })
+
+  test('creates and adopts a window presenter as one runtime transaction', async () => {
+    const port = makeFakeParentPort()
+    const { loaded, calls } = makeWindowAddon({
+      createPresenter: () => ({ widthPixels: 640, heightPixels: 360 }),
+      setPresenterBounds: () => ({ widthPixels: 800, heightPixels: 450 })
+    })
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({
+      id: 20,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
+    await sleep(20)
+    port.deliver({
+      id: 21,
+      method: 'createWindowPresenter',
+      args: [
+        {
+          presenterId: 'presenter-1',
+          sessionId: 'session-1',
+          parentWindowHandle: new Uint8Array([1, 2, 3, 4]),
+          options: { x: 10, y: 20, width: 320, height: 180, zOrder: 'overlay' }
+        }
+      ]
+    })
+    await sleep(20)
+
+    assert.deepEqual(
+      calls
+        .filter((call) =>
+          ['createPresenter', 'getVideoWindowHandle', 'adoptVideoWindow', 'setRenderSize'].includes(
+            call.method
+          )
+        )
+        .map((call) => call.method),
+      [
+        'getVideoWindowHandle',
+        'createPresenter',
+        'getVideoWindowHandle',
+        'adoptVideoWindow',
+        'setRenderSize'
+      ]
+    )
+    assert.deepEqual(
+      port.posted.filter((message) => message.id === 21),
+      [{ id: 21, type: 'done', result: { heightPixels: 360, widthPixels: 640 } }]
+    )
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'setRenderSize'),
+      [{ method: 'setRenderSize', args: ['session-1', 640, 360] }]
+    )
+
+    port.deliver({
+      id: 27,
+      method: 'setWindowPresenterBounds',
+      args: ['presenter-1', { x: 0, y: 0, width: 800, height: 450 }]
+    })
+    await sleep(20)
+    port.deliver({
+      id: 28,
+      method: 'setWindowPresenterSuspended',
+      args: ['presenter-1', true]
+    })
+    await sleep(20)
+
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'setRenderSize'),
+      [
+        { method: 'setRenderSize', args: ['session-1', 640, 360] },
+        { method: 'setRenderSize', args: ['session-1', 800, 450] }
+      ]
+    )
+    assert.deepEqual(
+      calls.filter((call) =>
+        ['setPresenterSuspended', 'setPresentationSuspended'].includes(call.method)
+      ),
+      [
+        { method: 'setPresenterSuspended', args: ['presenter-1', true] },
+        { method: 'setPresentationSuspended', args: ['session-1', true] }
+      ]
+    )
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
+      {
+        sessionId: 'session-1',
+        state: 'active',
+        windowPresenter: { presenterId: 'presenter-1', state: 'active' }
+      }
+    ])
+  })
+
+  test('detaches an owned window presenter before disposing its session', async () => {
+    const port = makeFakeParentPort()
+    const { loaded, calls } = makeWindowAddon()
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 33, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({
+      id: 34,
+      method: 'createWindowPresenter',
+      args: [
+        {
+          presenterId: 'presenter-1',
+          sessionId: 'session-1',
+          parentWindowHandle: new Uint8Array([1]),
+          options: { x: 0, y: 0, width: 320, height: 180, zOrder: 'overlay' }
+        }
+      ]
+    })
+    await sleep(20)
+    port.deliver({ id: 35, method: 'disposeSession', args: ['session-1'] })
+    await sleep(20)
+
+    assert.deepEqual(
+      calls
+        .filter((call) => ['destroyPresenter', 'disposeSession'].includes(call.method))
+        .map((call) => call.method),
+      ['destroyPresenter', 'disposeSession']
+    )
+    assert.deepEqual(
+      port.posted.filter((message) => message.id === 35),
+      [{ id: 35, type: 'done', result: undefined }]
+    )
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [])
+  })
+
+  test('rolls back native presenter creation when child adoption fails', async () => {
+    const port = makeFakeParentPort()
+    const { loaded, calls } = makeWindowAddon({
+      adoptVideoWindow: () => {
+        throw new Error('SetParent refused the child')
+      }
+    })
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 22, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({
+      id: 23,
+      method: 'createWindowPresenter',
+      args: [
+        {
+          presenterId: 'presenter-1',
+          sessionId: 'session-1',
+          parentWindowHandle: new Uint8Array([1]),
+          options: { x: 0, y: 0, width: 1, height: 1, zOrder: 'overlay' }
+        }
+      ]
+    })
+    await sleep(20)
+
+    const [reply] = port.posted.filter((message) => message.id === 23)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.recoverability, 'request')
+    assert.match(String(reply?.message), /SetParent refused the child/)
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'destroyPresenter'),
+      [{ method: 'destroyPresenter', args: ['presenter-1'] }]
+    )
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
+      { sessionId: 'session-1', state: 'active', windowPresenter: null }
+    ])
+  })
+
+  test('rolls back an adopted window presenter when initial render sizing fails', async () => {
+    const port = makeFakeParentPort()
+    const { loaded, calls } = makeWindowAddon({
+      createPresenter: () => ({ widthPixels: 640, heightPixels: 360 }),
+      setRenderSize: () => {
+        throw new Error('render target rejected initial size')
+      }
+    })
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded
+      })
+    )
+    port.deliver({ id: 29, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({
+      id: 30,
+      method: 'createWindowPresenter',
+      args: [
+        {
+          presenterId: 'presenter-1',
+          sessionId: 'session-1',
+          parentWindowHandle: new Uint8Array([1]),
+          options: { x: 0, y: 0, width: 640, height: 360, zOrder: 'overlay' }
+        }
+      ]
+    })
+    await sleep(20)
+
+    const [reply] = port.posted.filter((message) => message.id === 30)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.recoverability, 'request')
+    assert.match(String(reply?.message), /render target rejected initial size/)
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'destroyPresenter'),
+      [{ method: 'destroyPresenter', args: ['presenter-1'] }]
+    )
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
+      { sessionId: 'session-1', state: 'active', windowPresenter: null }
+    ])
+  })
+
+  test('makes failed window presenter destruction generation-fatal', async () => {
+    const port = makeFakeParentPort()
+    const exitCodes: number[] = []
+    const { loaded } = makeWindowAddon({
+      destroyPresenter: () => {
+        throw new Error('native detach failed')
+      }
+    })
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded,
+        exitProcess: (code) => exitCodes.push(code)
+      })
+    )
+    port.deliver({ id: 24, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({
+      id: 25,
+      method: 'createWindowPresenter',
+      args: [
+        {
+          presenterId: 'presenter-1',
+          sessionId: 'session-1',
+          parentWindowHandle: new Uint8Array([1]),
+          options: { x: 0, y: 0, width: 1, height: 1, zOrder: 'overlay' }
+        }
+      ]
+    })
+    await sleep(20)
+    port.deliver({ id: 26, method: 'destroyWindowPresenter', args: ['presenter-1'] })
+    await sleep(20)
+
+    const [reply] = port.posted.filter((message) => message.id === 26)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.recoverability, 'generation')
+    assert.match(String(reply?.message), /native detach failed/)
+    assert.deepEqual(exitCodes, [1])
+    assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
+      {
+        sessionId: 'session-1',
+        state: 'active',
+        windowPresenter: { presenterId: 'presenter-1', state: 'cleanup-required' }
+      }
+    ])
+  })
+
+  test('makes a duplicate native session id generation-fatal without ambiguous cleanup', async () => {
+    const port = makeFakeParentPort()
+    const exitCodes: number[] = []
+    setFrameLinkServiceName('test.frame.link')
+    const { loaded, calls } = makeLayerAddon()
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: async () => loaded,
+        exitProcess: (code) => exitCodes.push(code)
+      })
+    )
+
+    port.deliver({ id: 31, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+    port.deliver({ id: 32, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    await sleep(20)
+
+    const [reply] = port.posted.filter((message) => message.id === 32)
+    assert.equal(reply?.type, 'error')
+    assert.equal(reply?.recoverability, 'generation')
+    assert.match(String(reply?.message), /duplicate session id session-1/)
+    assert.deepEqual(exitCodes, [1])
+    assert.deepEqual(
+      calls.filter((call) => call.method === 'disposeSession'),
+      [],
+      'The duplicate id cannot identify which native session would be destroyed.'
     )
   })
 
@@ -491,7 +790,7 @@ describe('startEmpvRuntimeProcess', () => {
     await sleep(20)
 
     assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
-      { sessionId: 'session-1', state: 'disposing' }
+      { sessionId: 'session-1', state: 'disposing', windowPresenter: null }
     ])
     port.deliver({ id: 42, method: 'setVolume', args: ['session-1', 0.5] })
     await sleep(20)
@@ -602,8 +901,8 @@ describe('startEmpvRuntimeProcess', () => {
     await sleep(20)
 
     assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
-      { sessionId: 'session-1', state: 'disposing' },
-      { sessionId: 'session-2', state: 'active' }
+      { sessionId: 'session-1', state: 'disposing', windowPresenter: null },
+      { sessionId: 'session-2', state: 'active', windowPresenter: null }
     ])
     assert.deepEqual(
       calls.filter((call) => call.method === 'setVolume'),
@@ -617,7 +916,7 @@ describe('startEmpvRuntimeProcess', () => {
     disposeGate.open()
     await sleep(20)
     assert.deepEqual(port.postedOfType('runtime.heartbeat').at(-1)?.sessions, [
-      { sessionId: 'session-2', state: 'active' }
+      { sessionId: 'session-2', state: 'active', windowPresenter: null }
     ])
   })
 
