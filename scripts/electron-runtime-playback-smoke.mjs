@@ -193,21 +193,27 @@ async function waitForPlaying(runtimeSessionId, options = {}) {
 }
 
 async function loadSource(record, fixturePath, title) {
+  log(`${record.presenterId}: loading source`)
   await client.invoke('loadPlayback', record.runtimeSessionId, {
     streamUrl: fixturePath,
     title
   })
+  log(`${record.presenterId}: source loaded; configuring playback`)
   await client.invoke('setLoopFile', record.runtimeSessionId, true)
   await client.invoke('setPaused', record.runtimeSessionId, false)
+  log(`${record.presenterId}: playback configured`)
 }
 
 async function createPlaybackSession(presenterId, bounds, fixturePath) {
+  log(`${presenterId}: creating runtime session`)
   const { sessionId: runtimeSessionId, videoWindowHandle } = await client.invoke('createSession', {
     options: { volume: 0 }
   })
+  log(`${presenterId}: runtime session ${runtimeSessionId} created`)
   const record = { presenterId, runtimeSessionId, presenterCreated: false }
 
   try {
+    log(`${presenterId}: creating presenter`)
     const renderSize =
       host.presentationKind === 'layer'
         ? host.createPresenter(presenterId, browserWindow.getNativeWindowHandle(), {
@@ -218,6 +224,7 @@ async function createPlaybackSession(presenterId, bounds, fixturePath) {
             ...bounds,
             zOrder: 'overlay'
           })
+    log(`${presenterId}: presenter created`)
     record.presenterCreated = true
     livePresenters.add(presenterId)
 
@@ -228,17 +235,23 @@ async function createPlaybackSession(presenterId, bounds, fixturePath) {
           videoWindowHandle
         )}`
       )
+      log(`${presenterId}: adopting child window ${String(videoWindowHandle)}`)
       host.adoptVideoWindow(presenterId, videoWindowHandle)
+      log(`${presenterId}: child window adopted`)
     }
+    log(`${presenterId}: binding runtime session to presenter`)
     host.bindSessionToPresenter(runtimeSessionId, presenterId)
+    log(`${presenterId}: runtime session bound to presenter`)
 
     if (renderSize.widthPixels > 0 && renderSize.heightPixels > 0) {
+      log(`${presenterId}: setting render size`)
       await client.invoke(
         'setRenderSize',
         runtimeSessionId,
         renderSize.widthPixels,
         renderSize.heightPixels
       )
+      log(`${presenterId}: render size set`)
     }
     await loadSource(record, fixturePath, presenterId)
     return record
