@@ -46,6 +46,8 @@ position/cache/dropped-frame churn is coalesced to at most one notification per
 - Cross-building the Windows runtime: MinGW-w64, meson, ninja, nasm, cmake
 - Linux: X11 or Xwayland. **Native Wayland is not supported** — empv fails loudly
   when `DISPLAY` is unset.
+- Packaged Linux apps must leave Electron's `RunAsNode` fuse enabled so the
+  isolated playback child can start without a system Node installation.
 
 ## Install
 
@@ -170,11 +172,14 @@ tracks do not compete with them.
 ## Crash isolation (`empv/electron`)
 
 Loading the addon straight into your main process means a native mpv crash takes
-the whole app down. `empv/electron` runs the sessions in an Electron **utility
-process** instead, and keeps the presenter in the main process, so a crash costs
-you the playback runtime and nothing else.
+the whole app down. `empv/electron` keeps the presenter in the main process and
+runs sessions in a separate **playback process**, so a crash costs you that
+runtime generation and nothing else. macOS and Windows use an Electron utility
+process. Linux uses the same Electron executable in `ELECTRON_RUN_AS_NODE` mode:
+Chromium utility processes preload their own FFmpeg build, whose global symbols
+are not ABI-compatible with a distribution's libmpv dependency chain.
 
-Your utility entry is two lines — your bundler still decides where it lands:
+Your runtime entry is two lines — your bundler still decides where it lands:
 
 ```ts
 // src/main/playbackRuntime.ts -> built to out/main/playbackRuntime.js
@@ -194,7 +199,7 @@ import {
   createEmpvRuntimeClient
 } from 'empv/electron'
 
-// One name for this main process; the client injects it into every utility
+// One name for this main process; the client injects it into every playback
 // spawn and the host registers it with the native presenter.
 const frameLinkServiceName = createEmpvFrameLinkServiceName()
 
@@ -214,7 +219,7 @@ const host = await createEmpvPlaybackHost({ client, frameLinkServiceName })
 const presenterByRuntimeSession = new Map<string, string>()
 
 client.onExit((error, sessions) => {
-  // A utility exit is terminal for every session in that generation. Remove
+  // A playback-process exit is terminal for every session in that generation. Remove
   // each main-process presenter/binding and invalidate any renderer-facing id;
   // a later invoke starts a new generation, not a recovered session. Iterate
   // owned state, not `sessions`: that argument is the last heartbeat snapshot
@@ -239,7 +244,7 @@ client.onExit((error, sessions) => {
 const { sessionId, videoWindowHandle } = await client.invoke('createSession', {
   options: { volume: 1 }
 })
-// Native session ids are scoped to one utility generation and may be reused
+// Native session ids are scoped to one playback generation and may be reused
 // after a crash. Give the main-process presenter its own lifetime-unique id.
 const presenterId = `empv-presenter-${randomUUID()}`
 
@@ -267,7 +272,9 @@ host.bindSessionToPresenter(sessionId, presenterId)
 presenterByRuntimeSession.set(sessionId, presenterId)
 
 await client.invoke('setRenderSize', sessionId, renderSize.widthPixels, renderSize.heightPixels)
-await client.invoke('loadPlayback', sessionId, { streamUrl: '/path/to/video.mkv' })
+await client.invoke('loadPlayback', sessionId, {
+  streamUrl: '/path/to/video.mkv'
+})
 await client.invoke('setPaused', sessionId, false)
 
 client.onSnapshot(({ snapshot }) => render(snapshot))
@@ -292,24 +299,25 @@ table, and a method missing from the forwarding list fails to compile.
 The client owns spawn/respawn, request-reply correlation and event fan-out. It
 deliberately does **not** own a liveness watchdog: it reports heartbeats through
 `onHeartbeat` and exposes `terminate(reason)` and `getProcessId()`, so an app
-that already supervises several utility processes keeps one watchdog policy
+that already supervises several playback processes keeps one watchdog policy
 instead of inheriting a second one from a library. `terminate` is one call
 because the ordering matters -- in-flight requests have to fail before the
 process dies, or callers hang until the exit event lands. It is synchronous,
-idempotent, and uses Electron's `UtilityProcess.kill()`; a failed kill and a
+idempotent, and kills the selected runtime child; a failed kill and a
 consumer callback/listener that throws are surfaced through `onDiagnostic`
 instead of escaping an Electron event callback.
 
 Each spawned process is an isolated generation. A fatal error or explicit
 termination closes that generation to new requests immediately, rejects every
 in-flight request once, and remains the primary `EmpvRuntimeProcessFailure`
-reason reported by `onExit`; the final process exit code is attached separately.
+reason reported by `onExit`; the final process exit code and signal are attached
+separately.
 Messages and exits from a stopped generation cannot settle requests belonging to
 a later respawn.
 
-Heartbeats and `onExit` expose the utility's last observed session lifecycle
+Heartbeats and `onExit` expose the playback process's last observed session lifecycle
 snapshot (`creating`, `active`, or `disposing`) for diagnostics. It is not a
-recovery inventory: every session belongs to exactly one utility generation,
+recovery inventory: every session belongs to exactly one playback generation,
 and an exited generation's native sessions are gone rather than adoptable by a
 respawned process. Native session ids are generation-scoped and may repeat after
 respawn, so do not expose them as application-lifetime or renderer-lifetime
@@ -317,7 +325,7 @@ identities. Use a separate main-process-lifetime id for presenters and public
 session handles, remove the presenter binding on `onExit`, and reject commands
 for the lost public handle.
 
-`requestTimeoutMs` is required because a utility can keep heartbeating while an
+`requestTimeoutMs` is required because a playback process can keep heartbeating while an
 async native request never settles. The deadline starts when `invoke` is called,
 including time spent waiting for the process to spawn. A timeout records the
 request id, method and session id (when present), rejects every request in that
@@ -326,8 +334,8 @@ after their completion becomes unknown, the whole generation is treated as
 untrustworthy.
 
 `empv/electron` needs `electron` as a peer. It is built and verified against
-Electron 42; earlier versions with a stable `utilityProcess` API are likely fine
-but are not covered here.
+Electron 42. macOS and Windows require `utilityProcess`; Linux requires
+`ELECTRON_RUN_AS_NODE` support. Earlier Electron versions are not covered.
 
 ## Limitations
 

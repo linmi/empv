@@ -9,10 +9,9 @@
 //     scripts/embedded-mpv/linux-smoke.mjs <fixture.mp4>
 //
 // It loads build/Release/empv.node DIRECTLY (not through the staged runtime
-// resolver in src/runtime.ts), using the same platform-aware addon loader and
-// contract validation as production, then drives a real mpv playback of a tiny
-// generated fixture through initial playback, EOF, restart, and playlist
-// behavior.
+// resolver in src/runtime.ts), validates it with the production contract
+// loader, then drives a real mpv playback of a tiny generated fixture through
+// initial playback, EOF, restart, and playlist behavior.
 //
 // WHY THE DIRECT PATH LOAD (not loadEmbeddedLibMpvAddon):
 //   src/runtime.ts::resolveRuntime() only accepts the addon staged under
@@ -20,8 +19,7 @@
 //   LGPL libmpv runtime. CI has NO vendored runtime — it compiles the addon
 //   against the DISTRO's libmpv-dev and links the system libmpv.so.2. So the
 //   resolver would reject this addon. loadEmbeddedLibMpvAddonFromPath bypasses
-//   only runtime discovery; on Linux it still applies the RTLD_DEEPBIND
-//   dependency isolation used by Electron utility processes.
+//   only runtime discovery and still applies the production contract boundary.
 //
 // SCOPE — SESSION half only:
 //   This exercises the session-side facet (mpv init + its own unparented X11
@@ -164,7 +162,10 @@ async function main() {
     log(`getVideoWindowHandle() === ${windowHandle} OK`)
 
     // 4. Load the fixture and force play.
-    addon.loadPlayback(sessionId, { streamUrl: fixture, title: 'linux-smoke fixture' })
+    addon.loadPlayback(sessionId, {
+      streamUrl: fixture,
+      title: 'linux-smoke fixture'
+    })
     log('loadPlayback issued')
     addon.setPaused(sessionId, false)
     log('setPaused(false) issued')

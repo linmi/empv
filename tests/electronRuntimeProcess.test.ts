@@ -14,6 +14,7 @@ const NEVER_IDLE_MS = 60 * 60_000
 type PostedMessage = Record<string, unknown>
 
 type FakePort = EmpvRuntimeParentPort & {
+  disconnect(): void
   deliver(message: unknown): void
   posted: PostedMessage[]
   postedOfType(type: string): PostedMessage[]
@@ -25,6 +26,7 @@ const runningHandles: Array<{ stop(): void }> = []
 function makeFakeParentPort(): FakePort {
   const posted: PostedMessage[] = []
   const listeners: Array<(event: { data: unknown }) => void> = []
+  const disconnectListeners: Array<() => void> = []
 
   return {
     on(_event: 'message', handler: (event: { data: unknown }) => void) {
@@ -32,6 +34,16 @@ function makeFakeParentPort(): FakePort {
     },
     postMessage(message: unknown) {
       posted.push(message as PostedMessage)
+    },
+    onDisconnect(listener) {
+      disconnectListeners.push(listener)
+      return () => {
+        const index = disconnectListeners.indexOf(listener)
+        if (index >= 0) disconnectListeners.splice(index, 1)
+      }
+    },
+    disconnect() {
+      for (const listener of disconnectListeners) listener()
     },
     deliver(message: unknown) {
       assert.ok(listeners.length > 0, 'The runtime never subscribed to its parent port.')
@@ -68,11 +80,28 @@ afterEach(() => {
 })
 
 describe('startEmpvRuntimeProcess', () => {
-  test('refuses to run outside an Electron utility process', () => {
-    // No port supplied and none on `process`: this is a plain Node process, not
-    // an Electron utility process, and the runtime must say so instead of
-    // silently never answering.
-    assert.throws(() => startEmpvRuntimeProcess(), /Electron utility process/)
+  test('refuses to run without a parent process IPC channel', () => {
+    // No port supplied and this test runner has no parent IPC channel. The
+    // runtime must say so instead of silently never answering.
+    assert.throws(() => startEmpvRuntimeProcess(), /parentPort or a connected Node IPC channel/)
+  })
+
+  test('exits when its parent IPC channel disconnects', () => {
+    const port = makeFakeParentPort()
+    const exitCodes: number[] = []
+    runningHandles.push(
+      startEmpvRuntimeProcess({
+        parentPort: port,
+        idleTimeoutMs: NEVER_IDLE_MS,
+        loadAddon: () => new Promise(() => {}),
+        exitProcess: (code) => {
+          exitCodes.push(code)
+        }
+      })
+    )
+
+    port.disconnect()
+    assert.deepEqual(exitCodes, [0])
   })
 
   // The addon load is a blocking dlopen. If heartbeats started before it, a slow
@@ -170,7 +199,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 8, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 8,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
     port.deliver({ id: 9, method: 'seek', args: ['session-1', 12] })
     await sleep(20)
@@ -204,7 +237,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 20, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 20,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
     port.deliver({
       id: 21,
@@ -215,7 +252,12 @@ describe('startEmpvRuntimeProcess', () => {
 
     assert.deepEqual(
       calls.filter((call) => call.method === 'setVideoAdjustments'),
-      [{ method: 'setVideoAdjustments', args: ['session-1', 0.1, 0.2, 0.3, 0.4] }]
+      [
+        {
+          method: 'setVideoAdjustments',
+          args: ['session-1', 0.1, 0.2, 0.3, 0.4]
+        }
+      ]
     )
     const [reply] = port.posted.filter((message) => message.id === 21)
     assert.equal(reply?.type, 'done')
@@ -275,7 +317,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => layer.loaded
       })
     )
-    layerPort.deliver({ id: 1, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    layerPort.deliver({
+      id: 1,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
     const [layerReply] = layerPort.posted.filter((message) => message.id === 1)
     assert.ok(layerReply, 'The mach backend never answered sessions.create.')
@@ -303,7 +349,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => windowBackend.loaded
       })
     )
-    windowPort.deliver({ id: 2, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    windowPort.deliver({
+      id: 2,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
     const [windowReply] = windowPort.posted.filter((message) => message.id === 2)
     assert.ok(windowReply, 'The wid backend never answered sessions.create.')
@@ -326,7 +376,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 30, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 30,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
 
     const [reply] = port.posted.filter((message) => message.id === 30)
@@ -356,7 +410,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 31, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 31,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
 
     assert.deepEqual(
@@ -391,7 +449,11 @@ describe('startEmpvRuntimeProcess', () => {
         exitProcess: (code) => exitCodes.push(code)
       })
     )
-    port.deliver({ id: 32, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 32,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
 
     const [reply] = port.posted.filter((message) => message.id === 32)
@@ -419,7 +481,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 40, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 40,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
     port.deliver({ id: 41, method: 'disposeSession', args: ['session-1'] })
     await sleep(20)
@@ -484,7 +550,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 80, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 80,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
     port.deliver({ id: 81, method: 'disposeSession', args: ['session-1'] })
     await sleep(20)
@@ -514,9 +584,17 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 70, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 70,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
-    port.deliver({ id: 71, method: 'createSession', args: [{ options: { volume: 0.5 } }] })
+    port.deliver({
+      id: 71,
+      method: 'createSession',
+      args: [{ options: { volume: 0.5 } }]
+    })
     await sleep(20)
     port.deliver({ id: 72, method: 'disposeSession', args: ['session-1'] })
     await sleep(20)
@@ -561,7 +639,11 @@ describe('startEmpvRuntimeProcess', () => {
         exitProcess: (code) => exitCodes.push(code)
       })
     )
-    port.deliver({ id: 50, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 50,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
     port.deliver({ id: 51, method: 'disposeSession', args: ['session-1'] })
     await sleep(20)
@@ -587,7 +669,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 60, method: 'disposeSession', args: ['missing-session'] })
+    port.deliver({
+      id: 60,
+      method: 'disposeSession',
+      args: ['missing-session']
+    })
     await sleep(20)
 
     const [reply] = port.posted.filter((message) => message.id === 60)
@@ -621,7 +707,11 @@ describe('startEmpvRuntimeProcess', () => {
         loadAddon: async () => loaded
       })
     )
-    port.deliver({ id: 1, method: 'createSession', args: [{ options: { volume: 1 } }] })
+    port.deliver({
+      id: 1,
+      method: 'createSession',
+      args: [{ options: { volume: 1 } }]
+    })
     await sleep(20)
 
     publishSnapshot()

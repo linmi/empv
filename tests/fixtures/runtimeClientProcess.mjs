@@ -1,7 +1,9 @@
-const parentPort = process.parentPort
+import { resolveEmpvRuntimeParentPort } from '../../dist/electron/runtimeProcess.js'
+
+const parentPort = resolveEmpvRuntimeParentPort()
 
 if (!parentPort) {
-  throw new Error('The empv runtime client smoke fixture must run as an Electron utility process.')
+  throw new Error('The empv runtime client smoke fixture requires a parent IPC channel.')
 }
 
 const heartbeat = setInterval(() => {

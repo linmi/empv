@@ -16,6 +16,11 @@ describe('integrated Electron playback smoke', () => {
       join(process.cwd(), 'scripts/fixtures/electron-playback-runtime.mjs'),
       'utf8'
     )
+    const client = readFileSync(join(process.cwd(), 'src/electron/client.ts'), 'utf8')
+    const nodeRuntimeFork = readFileSync(
+      join(process.cwd(), 'src/electron/nodeRuntimeFork.ts'),
+      'utf8'
+    )
     const workflow = readFileSync(
       join(process.cwd(), '.github/workflows/native-compile.yml'),
       'utf8'
@@ -27,6 +32,10 @@ describe('integrated Electron playback smoke', () => {
       'pnpm run build && electron scripts/electron-runtime-playback-smoke.mjs'
     )
     assert.match(runtimeEntry, /startEmpvRuntimeProcess\(\)/)
+    assert.match(client, /platform === ['"]linux['"] \? forks\.node : forks\.utility/)
+    assert.match(nodeRuntimeFork, /ELECTRON_RUN_AS_NODE: ['"]1['"]/)
+    assert.match(nodeRuntimeFork, /serialization: ['"]advanced['"]/)
+    assert.doesNotMatch(nodeRuntimeFork, /RTLD_DEEPBIND/)
     assert.match(smoke, /createEmpvRuntimeClient\(\{/)
     assert.match(smoke, /createEmpvPlaybackHost\(\{ client, frameLinkServiceName \}\)/)
     assert.match(smoke, /const first = await createPlaybackSession\(/)

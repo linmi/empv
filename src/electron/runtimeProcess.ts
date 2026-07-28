@@ -12,13 +12,13 @@ import {
   type EmpvRuntimeSessionState
 } from './protocol.ts'
 
-// Playback utility process: hosts the embedded mpv sessions (decode + GL render
+// Isolated playback process: hosts the embedded mpv sessions (decode + GL render
 // into IOSurfaces). Loading the native addon and running mpv here means a native
 // mpv crash takes down only this process; the main process presenter survives
 // and recovers. AppKit never runs here — rendered frames are handed to the
 // main-process presenter over the MessagePort as pool ids + a per-frame index.
 //
-// This module is the whole utility process. A consumer's utility entry is
+// This module is the whole playback process. A consumer's runtime entry is
 // expected to be nothing but:
 //
 //   import { startEmpvRuntimeProcess } from 'empv/electron'
@@ -55,17 +55,57 @@ export type EmpvRuntimeProcessOptions = {
   exitProcess?: (code: number) => void
 }
 
-// Electron's utility-process parent port, typed structurally to just the two
-// members this module uses. Structural on purpose: the utility entry must not
-// need electron's main-process typings, and a caller can supply a port of its
-// own without reproducing Electron's full MessagePort surface.
+// Cross-process parent channel, typed structurally to only what this module
+// uses. Electron utility processes supply process.parentPort; Linux Node
+// children are adapted from process.send/process.on('message').
 export type EmpvRuntimeParentPort = {
   on(event: 'message', listener: (event: { data: unknown }) => void): void
+  onDisconnect?(listener: () => void): () => void
   postMessage(message: unknown): void
 }
 
+type RuntimeProcessEnvironment = NodeJS.Process & {
+  parentPort?: EmpvRuntimeParentPort
+}
+
+export function resolveEmpvRuntimeParentPort(
+  runtimeProcess: RuntimeProcessEnvironment = process
+): EmpvRuntimeParentPort | undefined {
+  if (runtimeProcess.parentPort) {
+    return runtimeProcess.parentPort
+  }
+  if (!runtimeProcess.connected || typeof runtimeProcess.send !== 'function') {
+    return undefined
+  }
+
+  return {
+    on(_event, listener) {
+      runtimeProcess.on('message', (message) => listener({ data: message }))
+    },
+    onDisconnect(listener) {
+      runtimeProcess.once('disconnect', listener)
+      return () => runtimeProcess.off('disconnect', listener)
+    },
+    postMessage(message) {
+      if (!runtimeProcess.connected || typeof runtimeProcess.send !== 'function') {
+        throw new Error('Cannot post an empv runtime message: the parent IPC channel is closed.')
+      }
+      runtimeProcess.send(message, (error) => {
+        if (!error) return
+        try {
+          runtimeProcess.stderr.write(
+            `[empv-runtime] parent IPC send failed: ${error.stack ?? error.message}\n`
+          )
+        } finally {
+          runtimeProcess.exit(1)
+        }
+      })
+    }
+  }
+}
+
 export type EmpvRuntimeProcessHandle = {
-  // Clears the idle and heartbeat timers. A utility process never needs this --
+  // Clears the idle and heartbeat timers. A playback child never needs this --
   // it exits by idle timeout or with its parent -- but anything hosting the
   // runtime in a longer-lived process does, and without it the idle timer alone
   // keeps an event loop alive until it fires.
@@ -78,14 +118,17 @@ export function startEmpvRuntimeProcess(
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
   const loadAddon = options.loadAddon ?? loadEmbeddedLibMpvAddon
   const exitProcess = options.exitProcess ?? ((code: number) => process.exit(code))
-  const suppliedParentPort: EmpvRuntimeParentPort | undefined =
-    options.parentPort ?? (process as { parentPort?: EmpvRuntimeParentPort }).parentPort
+  const suppliedParentPort = options.parentPort ?? resolveEmpvRuntimeParentPort()
 
   if (!suppliedParentPort) {
-    throw new Error('The empv playback runtime must run inside an Electron utility process.')
+    throw new Error(
+      'The empv playback runtime must have an Electron parentPort or a connected Node IPC channel.'
+    )
   }
 
   const runtimeParentPort = suppliedParentPort
+  const removeParentDisconnectListener =
+    runtimeParentPort.onDisconnect?.(() => exitProcess(0)) ?? (() => {})
 
   const sessions = new Map<string, EmpvRuntimeSessionLifecycle>()
   let idleTimer: NodeJS.Timeout | null = null
@@ -436,6 +479,7 @@ export function startEmpvRuntimeProcess(
   return {
     stop() {
       stopped = true
+      removeParentDisconnectListener()
       if (idleTimer) clearTimeout(idleTimer)
       if (heartbeatTimer) clearInterval(heartbeatTimer)
       if (generationFailureExit) clearImmediate(generationFailureExit)

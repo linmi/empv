@@ -16,7 +16,7 @@ import type { EmpvRuntimeClient } from './client.ts'
 //
 // Playing one video correctly takes four things to agree: the addon has to be
 // loaded in THIS process (for the presenter), a mach service name has to be
-// registered here and handed to the utility process at spawn, every session has
+// registered here and handed to the playback process at spawn, every session has
 // to be paired with a presenter, and every frame event has to be turned into a
 // presentSurface call with its four arguments in the right order. Nothing checks
 // any of that at compile time, and getting it wrong produces a black rectangle
@@ -33,7 +33,7 @@ import type { EmpvRuntimeClient } from './client.ts'
 // utility whether playback is supported should not pay for that.
 
 export type EmpvPlaybackHostOptions = {
-  // The client driving the utility process. It must have been created with the
+  // The client driving the playback process. It must have been created with the
   // same frameLinkServiceName passed below -- generate it once with
   // createEmpvFrameLinkServiceName() and hand that one value to both.
   client: EmpvRuntimeClient
@@ -115,7 +115,7 @@ export function createEmpvFrameLinkServiceName(): string {
 // after the binary changes, and caches the result per inode ACROSS processes.
 // Doing that first load on the main thread stalls it for seconds on a freshly
 // built binary -- long enough to beachball the UI and trip utility watchdogs. So
-// the utility process is asked a trivial question first: it loads the addon
+// the playback process is asked a trivial question first: it loads the addon
 // there, and the load here lands on a warm cache.
 //
 // This is a performance step, NOT a fallback. Its failure is reported and

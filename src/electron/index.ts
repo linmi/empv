@@ -1,7 +1,6 @@
-// Main-process surface. The utility-process half is a separate entry
-// (`empv/electron/runtime-process`) on purpose: `electron`'s main-process API
-// (utilityProcess) does not exist inside a utility process, so the utility entry
-// must never pull this module in.
+// Main-process surface. The isolated playback-process half is a separate entry
+// (`empv/electron/runtime-process`) on purpose: it must never pull main-process
+// Electron APIs into either a Chromium utility process or a Linux Node child.
 export {
   createEmpvRuntimeClient,
   EmpvRuntimeProcessFailure,

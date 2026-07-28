@@ -4,20 +4,20 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { describe, test } from 'node:test'
 
-import type { ForkOptions, UtilityProcess } from 'electron'
-
 import {
   createEmpvRuntimeClientWithFork,
   EmpvRuntimeProcessFailure,
+  type EmpvRuntimeChildProcess,
   type EmpvRuntimeClientDiagnostic,
   type EmpvRuntimeClientOptions,
-  type EmpvRuntimeProcessFork
+  type EmpvRuntimeProcessFork,
+  type EmpvRuntimeProcessForkOptions
 } from '../src/electron/clientCore.ts'
 import type { EmpvRuntimeRequest } from '../src/electron/protocol.ts'
 
 const EXISTING_ENTRY = fileURLToPath(new URL('../src/electron/runtimeProcess.ts', import.meta.url))
 
-class FakeUtilityProcess extends EventEmitter {
+class FakeRuntimeProcess extends EventEmitter implements EmpvRuntimeChildProcess {
   pid: number | undefined
   stdout = null
   stderr = null
@@ -25,14 +25,18 @@ class FakeUtilityProcess extends EventEmitter {
   killCalls = 0
   killResult = true
   killError: Error | null = null
+  sendError: Error | null = null
+  sendThrow: Error | null = null
 
   constructor(pid: number) {
     super()
     this.pid = pid
   }
 
-  postMessage(message: EmpvRuntimeRequest): void {
+  postMessage(message: EmpvRuntimeRequest, onError: (error: Error) => void): void {
+    if (this.sendThrow) throw this.sendThrow
     this.posted.push(message)
+    if (this.sendError) onError(this.sendError)
   }
 
   kill(): boolean {
@@ -41,17 +45,46 @@ class FakeUtilityProcess extends EventEmitter {
     return this.killResult
   }
 
+  onMessage(listener: (message: unknown) => void): void {
+    this.on('message', listener)
+  }
+
+  onceExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void {
+    this.once('exit', listener)
+  }
+
+  onceFailure(listener: Parameters<EmpvRuntimeChildProcess['onceFailure']>[0]): void {
+    this.once('error', listener)
+  }
+
+  onceSpawn(listener: () => void): void {
+    this.once('spawn', listener)
+  }
+
   spawn(): void {
     this.emit('spawn')
   }
 
-  exit(code: number): void {
-    this.emit('exit', code)
+  exit(code: number | null, signal: NodeJS.Signals | null = null): void {
+    this.emit('exit', code, signal)
     this.pid = undefined
   }
 
   fatal(location = 'runtime.cc:42', report = 'diagnostic report'): void {
-    this.emit('error', 'FatalError', location, report)
+    this.emit('error', {
+      type: 'fatal-error',
+      fatalType: 'FatalError',
+      location,
+      report
+    })
+  }
+
+  processFailure(location = 'node:child_process.fork', report = 'spawn failed'): void {
+    this.emit('error', {
+      type: 'process-error',
+      location,
+      report
+    })
   }
 
   message(message: unknown): void {
@@ -60,13 +93,17 @@ class FakeUtilityProcess extends EventEmitter {
 }
 
 function makeHarness(overrides: Partial<EmpvRuntimeClientOptions> = {}) {
-  const children: FakeUtilityProcess[] = []
-  const forkCalls: { modulePath: string; args: string[]; options: ForkOptions }[] = []
+  const children: FakeRuntimeProcess[] = []
+  const forkCalls: {
+    modulePath: string
+    args: string[]
+    options: EmpvRuntimeProcessForkOptions
+  }[] = []
   const fork: EmpvRuntimeProcessFork = (modulePath, args, options) => {
     forkCalls.push({ modulePath, args, options })
-    const child = new FakeUtilityProcess(4_000 + children.length)
+    const child = new FakeRuntimeProcess(4_000 + children.length)
     children.push(child)
-    return child as UtilityProcess
+    return child
   }
   const diagnostics: EmpvRuntimeClientDiagnostic[] = []
   const client = createEmpvRuntimeClientWithFork(
@@ -135,13 +172,61 @@ describe('createEmpvRuntimeClient', () => {
       return true
     })
     await assert.rejects(client.invoke('isSupported'), /FatalError at native\.cc:9/)
+    assert.equal(children[0].killCalls, 1)
 
     children[0].exit(87)
     assert.equal(exits.length, 1)
     assert.equal(exits[0].terminalReason.type, 'fatal-error')
     assert.equal(exits[0].exitCode, 87)
+    assert.equal(exits[0].exitSignal, null)
     assert.match(exits[0].message, /native diagnostic/)
-    assert.match(exits[0].message, /Final exit code: 87/)
+    assert.match(exits[0].message, /Final exit: code 87/)
+  })
+
+  test('terminates the generation for synchronous and asynchronous IPC send failures', async () => {
+    for (const failureMode of ['throw', 'callback'] as const) {
+      const { children, client } = makeHarness()
+      const pending = client.invoke('setVolume', 'session-a', 0.5)
+      const sendError = new Error(`${failureMode} send failed`)
+      if (failureMode === 'throw') children[0].sendThrow = sendError
+      else children[0].sendError = sendError
+      children[0].spawn()
+
+      await assert.rejects(pending, (error: unknown) => {
+        assert.ok(error instanceof EmpvRuntimeProcessFailure)
+        assert.deepEqual(error.terminalReason, {
+          type: 'request-send-failure',
+          requestId: 1,
+          method: 'setVolume',
+          sessionId: 'session-a',
+          message: `${failureMode} send failed`
+        })
+        return true
+      })
+      assert.equal(children[0].killCalls, 1)
+      await assert.rejects(client.invoke('isSupported'), /IPC state is no longer trustworthy/)
+      children[0].exit(1)
+    }
+  })
+
+  test('attributes a Node child process error without calling it an Electron FatalError', async () => {
+    const { children, client } = makeHarness()
+    const pending = client.invoke('isSupported')
+
+    children[0].processFailure('node:child_process.fork', 'spawn EACCES')
+
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof EmpvRuntimeProcessFailure)
+      assert.deepEqual(error.terminalReason, {
+        type: 'process-error',
+        location: 'node:child_process.fork',
+        report: 'spawn EACCES'
+      })
+      assert.doesNotMatch(error.message, /FatalError/)
+      return true
+    })
+    assert.equal(children[0].killCalls, 1)
+    children[0].exit(1)
   })
 
   test('preserves an unrecoverable request as the generation cause and rejects all pending work', async () => {
@@ -220,6 +305,18 @@ describe('createEmpvRuntimeClient', () => {
       return true
     })
     failed.children[0].exit(1)
+
+    const signaled = makeHarness()
+    const signalBeforeSpawn = signaled.client.invoke('isSupported')
+    signaled.children[0].exit(null, 'SIGKILL')
+    await assert.rejects(signalBeforeSpawn, (error: unknown) => {
+      assert.ok(error instanceof EmpvRuntimeProcessFailure)
+      assert.equal(error.terminalReason.type, 'unexpected-exit')
+      assert.equal(error.exitCode, null)
+      assert.equal(error.exitSignal, 'SIGKILL')
+      assert.match(error.message, /signal SIGKILL/)
+      return true
+    })
   })
 
   test('terminate is idempotent, rejects pending once, and diagnoses kill false', async () => {
@@ -256,7 +353,7 @@ describe('createEmpvRuntimeClient', () => {
     assert.equal(exits[0].exitCode, 143)
   })
 
-  test('contains UtilityProcess.kill throws and reports them as diagnostics', async () => {
+  test('contains child-process kill throws and reports them as diagnostics', async () => {
     const { children, client, diagnostics } = makeHarness()
     const pending = client.invoke('isSupported')
     children[0].spawn()
@@ -323,7 +420,7 @@ describe('createEmpvRuntimeClient', () => {
     assert.equal(exits[0].exitCode, 143)
   })
 
-  test('applies the same deadline while the utility process is still spawning', async () => {
+  test('applies the same deadline while the runtime process is still spawning', async () => {
     const { children, client } = makeHarness({ requestTimeoutMs: 20 })
     const pending = client.invoke('createSession', { options: { volume: 1 } })
 

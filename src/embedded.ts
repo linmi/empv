@@ -1,4 +1,5 @@
-import { loadNativeAddonModule } from './nativeAddonLoader.ts'
+import { createRequire } from 'node:module'
+
 import {
   assertLibMpvRuntime,
   type LibMpvRuntime,
@@ -192,7 +193,7 @@ export type LibMpvFrameNotifier = (
   contentGeneration: number
 ) => void
 
-// How a backend gets decoded video from the utility process to the on-screen
+// How a backend gets decoded video from the isolated playback process to the on-screen
 // window. macOS ships IOSurfaces to a CALayer over a mach frame link
 // ('layer'); Windows/Linux embed an OS video window that the main
 // process reparents into the app window ('window'). Callers MUST branch on
@@ -200,9 +201,9 @@ export type LibMpvFrameNotifier = (
 export type LibMpvPresentationKind = 'layer' | 'window'
 
 // The API family every backend exports regardless of presentation model: mpv
-// session control (utility process) plus presenter bounds/scale/visibility (main
+// session control (playback process) plus presenter bounds/scale/visibility (main
 // process). The two presentation-specific facets extend this. This type is
-// internal to the main/utility processes and is not part of the renderer-facing
+// internal to the main/playback processes and is not part of the renderer-facing
 // IPC contract.
 export type LibMpvEmbeddedCoreAddon = {
   isSupported(): boolean
@@ -210,7 +211,7 @@ export type LibMpvEmbeddedCoreAddon = {
   // fixed by the returned kind.
   getPresentationKind(): LibMpvPresentationKind
 
-  // --- Session-side API (playback utility process) ---
+  // --- Session-side API (isolated playback process) ---
   // Session setup/teardown run mpv initialization and terminate on a worker
   // thread; blocking the AppKit main thread there beachballs the whole app.
   // onSnapshotChanged fires on the JS thread after the session snapshot changed;
@@ -393,7 +394,7 @@ export type LibMpvLayerAddon = LibMpvEmbeddedCoreAddon & {
   unobserveWindowOcclusion(windowHandle: Buffer): void
 }
 
-// Windows/Linux: mpv renders into an OS video window the utility process owns;
+// Windows/Linux: mpv renders into an OS video window the playback process owns;
 // the main-process presenter reparents it into the app window. No mach frame
 // link exists, so the mach-link functions are absent by design.
 export type LibMpvWindowAddon = LibMpvEmbeddedCoreAddon & {
@@ -405,7 +406,7 @@ export type LibMpvWindowAddon = LibMpvEmbeddedCoreAddon & {
     options: LibMpvWindowAttachOptions
   ): LibMpvRenderSize
   // The session's video window handle (HWND / X11 window id, as a number), read
-  // by the utility runtime and shipped to the main process. null when the
+  // by the playback runtime and shipped to the main process. null when the
   // session is unknown or has no window yet.
   getVideoWindowHandle(sessionId: string): number | null
   // Hands the presenter the session's video window handle so it can reparent it
@@ -454,7 +455,7 @@ function hasFunctions<const Names extends readonly string[]>(
 const CORE_FUNCTIONS = [
   'isSupported',
   'getPresentationKind',
-  // Session-side (playback utility process).
+  // Session-side (isolated playback process).
   'createSession',
   'disposeSession',
   'loadPlayback',
@@ -565,18 +566,17 @@ export function normalizeEmbeddedAddon(value: unknown): NormalizedEmbeddedAddon 
 
 export function loadEmbeddedLibMpvAddonFromPath(
   addonPath: string,
-  requireAddon?: NodeRequire
+  requireAddon: NodeRequire = createRequire(import.meta.url)
 ): LibMpvEmbeddedNativeAddon {
-  return normalizeEmbeddedAddon(loadNativeAddonModule(addonPath, requireAddon)).addon
+  return normalizeEmbeddedAddon(requireAddon(addonPath)).addon
 }
 
 export async function loadEmbeddedLibMpvAddon(
   options: EmbeddedLibMpvAddonLoadOptions = {}
 ): Promise<LoadedEmbeddedLibMpvAddon> {
   const runtime = await assertLibMpvRuntime(options)
-  const normalized = normalizeEmbeddedAddon(
-    loadNativeAddonModule(runtime.addonPath, options.requireAddon)
-  )
+  const requireAddon = options.requireAddon ?? createRequire(import.meta.url)
+  const normalized = normalizeEmbeddedAddon(requireAddon(runtime.addonPath))
 
   return { ...normalized, runtime }
 }

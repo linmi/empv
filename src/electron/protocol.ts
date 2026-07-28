@@ -6,7 +6,7 @@ import type {
 } from '../embedded.ts'
 
 // Typed request/reply + event protocol between an Electron main process and the
-// playback utility process (runtimeProcess.ts). The utility hosts the mpv
+// isolated playback process (runtimeProcess.ts). That process hosts the mpv
 // sessions (decode + GL render into IOSurfaces); the main process owns the
 // presenter (CALayer/NSView attachment, or the reparented video window) and the
 // renderer-facing IPC.

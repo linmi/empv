@@ -379,7 +379,7 @@ jobs:
         run: node --experimental-strip-types scripts/embedded-mpv/macos-smoke.mjs
 
       # Main + utility 两个真实 Electron 进程：双 session、单 session teardown 隔离、
-      # utility SIGKILL、generation respawn/raw id 复用、连续换源和最终 presenter 清理。
+      # playback SIGKILL、generation respawn/raw id 复用、连续换源和最终 presenter 清理。
       - name: Run crash-isolated Electron playback smoke
         run: pnpm run smoke:electron-playback
 
@@ -455,7 +455,7 @@ jobs:
   #
   # Node-only smoke 跑 session 半边（mpv 初始化 + 自建 override-redirect 未挂载视频窗口
   # + 播放）；随后 Electron smoke 用 BrowserWindow 提供真实父 X 窗口，覆盖
-  # createPresenter/adoptVideoWindow、双 session、utility SIGKILL/respawn 与 teardown。
+  # createPresenter/adoptVideoWindow、双 session、playback SIGKILL/respawn 与 teardown。
   # Windows 运行时由登录桌面的 interactive workflow 覆盖：hosted runner 的
   # window-station / desktop 交互语义不同，不能冒充用户会话。
   #
@@ -493,7 +493,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       # crash-isolated gate uses the package's Electron peer in a real main +
-      # utility process pair. This standalone package repo has no committed
+      # Linux Node-mode playback child pair. This standalone package repo has no committed
       # lockfile, matching the macOS job's install policy.
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -513,8 +513,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libmpv-dev xvfb ffmpeg libgl1-mesa-dri
 
-      # 把 linux job 编好的 .node 落回稳定的 native 输出路径；冒烟脚本用 createRequire
-      # 按相对该路径（../../native/build/Release/empv.node）加载。
+      # 把 linux job 编好的 .node 落回稳定的 native 输出路径；冒烟脚本通过生产
+      # contract loader 按该路径（../../native/build/Release/empv.node）加载。
       - name: Download the freshly compiled empv.node
         uses: actions/download-artifact@v4
         with:
@@ -567,8 +567,8 @@ jobs:
       # GitHub's hosted Linux image does not install Electron's downloaded
       # chrome-sandbox as root:4755, so Chromium aborts before the app entry
       # runs unless this CI-only launch disables that renderer sandbox. The
-      # utility process remains a separate OS process, which is the isolation
-      # boundary this smoke kills and verifies.
+      # playback child uses ELECTRON_RUN_AS_NODE and remains a separate OS
+      # process, which is the isolation boundary this smoke kills and verifies.
       - name: Run crash-isolated Electron playback smoke under Xvfb
         run: |
           pnpm run build

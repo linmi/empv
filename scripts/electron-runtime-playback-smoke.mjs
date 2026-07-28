@@ -302,7 +302,7 @@ async function run() {
   if (process.env.EMPV_SMOKE_ADDON_PATH) {
     // The existing cross-platform native smokes use this diagnostic override.
     // Normalize it to the public runtime resolver key so both the main-process
-    // presenter and every utility generation load the exact same addon.
+    // presenter and every playback-process generation load the exact same addon.
     process.env.EMPV_ADDON_PATH = path.resolve(process.env.EMPV_SMOKE_ADDON_PATH)
   }
   const frameLinkServiceName = createEmpvFrameLinkServiceName()
@@ -329,8 +329,12 @@ async function run() {
   assert.notEqual(first.runtimeSessionId, second.runtimeSessionId)
 
   const [firstSnapshot, secondSnapshot] = await Promise.all([
-    waitForPlaying(first.runtimeSessionId, { expectedStreamUrl: firstFixturePath }),
-    waitForPlaying(second.runtimeSessionId, { expectedStreamUrl: secondFixturePath })
+    waitForPlaying(first.runtimeSessionId, {
+      expectedStreamUrl: firstFixturePath
+    }),
+    waitForPlaying(second.runtimeSessionId, {
+      expectedStreamUrl: secondFixturePath
+    })
   ])
   await Promise.all([assertCapturedFrame(first), assertCapturedFrame(second)])
   await waitForSessionStates([first.runtimeSessionId, second.runtimeSessionId])
@@ -355,7 +359,7 @@ async function run() {
   await waitForSessionStates([second.runtimeSessionId])
 
   const runtimePid = client.getProcessId()
-  assert.ok(runtimePid, 'The active utility process did not expose its pid.')
+  assert.ok(runtimePid, 'The active playback process did not expose its pid.')
   const runtimeExit = waitForNextExit()
   process.kill(runtimePid, 'SIGKILL')
   const lostGeneration = await runtimeExit
@@ -367,7 +371,7 @@ async function run() {
   assert.equal(browserWindow.isDestroyed(), false)
   releasePresenter(second)
   log(
-    `utility pid ${String(runtimePid)} was killed; Electron and BrowserWindow survived generation ${String(
+    `playback pid ${String(runtimePid)} was killed; Electron and BrowserWindow survived generation ${String(
       lostGeneration.error.generation
     )}`
   )
@@ -380,7 +384,7 @@ async function run() {
   assert.equal(
     restarted.runtimeSessionId,
     first.runtimeSessionId,
-    'A fresh utility generation should demonstrate raw native session-id reuse.'
+    'A fresh playback generation should demonstrate raw native session-id reuse.'
   )
   assert.notEqual(restarted.presenterId, first.presenterId)
   const restartedSnapshot = await waitForPlaying(restarted.runtimeSessionId, {

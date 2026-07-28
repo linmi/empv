@@ -1,7 +1,5 @@
 import { existsSync } from 'node:fs'
 
-import type { ForkOptions, UtilityProcess } from 'electron'
-
 import {
   EMPV_FRAME_LINK_ENV_KEY,
   type EmpvRuntimeArgs,
@@ -17,7 +15,12 @@ export type EmpvRuntimeSnapshotEvent = Extract<EmpvRuntimeEvent, { type: 'sessio
 export type EmpvRuntimeFrameEvent = Extract<EmpvRuntimeEvent, { type: 'session.frame' }>
 
 export type EmpvRuntimeTerminalReason =
-  | { type: 'fatal-error'; fatalType: 'FatalError'; location: string; report: string }
+  | {
+      type: 'fatal-error'
+      fatalType: 'FatalError'
+      location: string
+      report: string
+    }
   | {
       type: 'request-timeout'
       requestId: number
@@ -33,6 +36,18 @@ export type EmpvRuntimeTerminalReason =
       errorName: string
       message: string
     }
+  | {
+      type: 'process-error'
+      location: string
+      report: string
+    }
+  | {
+      type: 'request-send-failure'
+      requestId: number
+      method: EmpvRuntimeMethod
+      sessionId: string | null
+      message: string
+    }
   | { type: 'terminate'; reason: string }
   | { type: 'unexpected-exit' }
 
@@ -40,17 +55,20 @@ export class EmpvRuntimeProcessFailure extends Error {
   readonly generation: number
   readonly terminalReason: EmpvRuntimeTerminalReason
   readonly exitCode: number | null
+  readonly exitSignal: NodeJS.Signals | null
 
   constructor(
     generation: number,
     terminalReason: EmpvRuntimeTerminalReason,
-    exitCode: number | null = null
+    exitCode: number | null = null,
+    exitSignal: NodeJS.Signals | null = null
   ) {
-    super(formatProcessFailure(generation, terminalReason, exitCode))
+    super(formatProcessFailure(generation, terminalReason, exitCode, exitSignal))
     this.name = 'EmpvRuntimeProcessFailure'
     this.generation = generation
     this.terminalReason = terminalReason
     this.exitCode = exitCode
+    this.exitSignal = exitSignal
   }
 }
 
@@ -92,7 +110,7 @@ export type EmpvRuntimeClientOptions = {
   onSpawn?: () => void
   onHeartbeat?: () => void
   onStopped?: () => void
-  // Listener and UtilityProcess.kill failures cannot be thrown from Electron
+  // Listener and child-process kill failures cannot be thrown from process
   // event callbacks. They are reported here; without a handler the client
   // writes them to stderr.
   onDiagnostic?: (diagnostic: EmpvRuntimeClientDiagnostic) => void
@@ -113,11 +131,42 @@ export type EmpvRuntimeClient = {
   terminate(reason: string): void
 }
 
+export type EmpvRuntimeChildProcess = {
+  readonly pid: number | undefined
+  readonly stderr: NodeJS.ReadableStream | null
+  readonly stdout: NodeJS.ReadableStream | null
+  kill(): boolean
+  onMessage(listener: (message: unknown) => void): void
+  onceExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void
+  onceFailure(listener: (failure: EmpvRuntimeChildFailure) => void): void
+  onceSpawn(listener: () => void): void
+  postMessage(message: EmpvRuntimeRequest, onError: (error: Error) => void): void
+}
+
+export type EmpvRuntimeChildFailure =
+  | {
+      type: 'fatal-error'
+      fatalType: 'FatalError'
+      location: string
+      report: string
+    }
+  | {
+      type: 'process-error'
+      location: string
+      report: string
+    }
+
+export type EmpvRuntimeProcessForkOptions = {
+  env: NodeJS.ProcessEnv
+  serviceName: string
+  stdio: 'pipe'
+}
+
 export type EmpvRuntimeProcessFork = (
   modulePath: string,
   args: string[],
-  options: ForkOptions
-) => UtilityProcess
+  options: EmpvRuntimeProcessForkOptions
+) => EmpvRuntimeChildProcess
 
 type PendingRequest = {
   method: EmpvRuntimeMethod
@@ -132,7 +181,7 @@ type GenerationState = 'spawning' | 'running' | 'terminating' | 'stopped'
 type Generation = {
   id: number
   state: GenerationState
-  child: UtilityProcess
+  child: EmpvRuntimeChildProcess
   sessions: EmpvRuntimeSessionState[]
   pendingRequests: Map<number, PendingRequest>
   spawnPromise: Promise<Generation>
@@ -174,24 +223,39 @@ function requestSessionId(args: readonly unknown[]): string | null {
 function formatProcessFailure(
   generation: number,
   reason: EmpvRuntimeTerminalReason,
-  exitCode: number | null
+  exitCode: number | null,
+  exitSignal: NodeJS.Signals | null
 ): string {
-  const exitSuffix = exitCode === null ? '' : ` Final exit code: ${String(exitCode)}.`
+  const exitFacts = [
+    exitCode === null ? null : `code ${String(exitCode)}`,
+    exitSignal === null ? null : `signal ${exitSignal}`
+  ].filter((fact): fact is string => fact !== null)
+  const exitSuffix = exitFacts.length === 0 ? '' : ` Final exit: ${exitFacts.join(', ')}.`
   if (reason.type === 'fatal-error') {
-    return `The empv playback utility process generation ${generation} encountered ${reason.fatalType} at ${reason.location}.\n${reason.report}${exitSuffix}`
+    return `The empv playback runtime process generation ${generation} encountered ${reason.fatalType} at ${reason.location}.\n${reason.report}${exitSuffix}`
   }
   if (reason.type === 'request-timeout') {
     const sessionSuffix = reason.sessionId === null ? '' : ` for session ${reason.sessionId}`
-    return `The empv playback utility process generation ${generation} did not answer ${reason.method} request #${reason.requestId}${sessionSuffix} within ${reason.timeoutMs}ms and was terminated because its native state is no longer trustworthy.${exitSuffix}`
+    return `The empv playback runtime process generation ${generation} did not answer ${reason.method} request #${reason.requestId}${sessionSuffix} within ${reason.timeoutMs}ms and was terminated because its native state is no longer trustworthy.${exitSuffix}`
   }
   if (reason.type === 'runtime-failure') {
     const sessionSuffix = reason.sessionId === null ? '' : ` for session ${reason.sessionId}`
-    return `The empv playback utility process generation ${generation} reported unrecoverable ${reason.errorName} during ${reason.method} request #${reason.requestId}${sessionSuffix}: ${reason.message}${exitSuffix}`
+    return `The empv playback runtime process generation ${generation} reported unrecoverable ${reason.errorName} during ${reason.method} request #${reason.requestId}${sessionSuffix}: ${reason.message}${exitSuffix}`
+  }
+  if (reason.type === 'process-error') {
+    return `The empv playback runtime process generation ${generation} failed at ${reason.location}.\n${reason.report}${exitSuffix}`
+  }
+  if (reason.type === 'request-send-failure') {
+    const sessionSuffix = reason.sessionId === null ? '' : ` for session ${reason.sessionId}`
+    return `The empv playback runtime process generation ${generation} could not send ${reason.method} request #${reason.requestId}${sessionSuffix}: ${reason.message}. The generation was terminated because its IPC state is no longer trustworthy.${exitSuffix}`
   }
   if (reason.type === 'terminate') {
-    return `The empv playback utility process generation ${generation} was terminated: ${reason.reason}.${exitSuffix}`
+    return `The empv playback runtime process generation ${generation} was terminated: ${reason.reason}.${exitSuffix}`
   }
-  return `The empv playback utility process generation ${generation} exited unexpectedly with code ${String(exitCode)}.`
+  if (exitFacts.length === 0) {
+    return `The empv playback runtime process generation ${generation} exited unexpectedly without an exit code or signal.`
+  }
+  return `The empv playback runtime process generation ${generation} exited unexpectedly with ${exitFacts.join(', ')}.`
 }
 
 export function createEmpvRuntimeClientWithFork(
@@ -279,11 +343,12 @@ export function createEmpvRuntimeClientWithFork(
   function beginTerminal(
     generation: Generation,
     reason: EmpvRuntimeTerminalReason,
-    exitCode: number | null = null
+    exitCode: number | null = null,
+    exitSignal: NodeJS.Signals | null = null
   ): EmpvRuntimeProcessFailure {
     if (generation.terminalError) return generation.terminalError
 
-    const error = new EmpvRuntimeProcessFailure(generation.id, reason, exitCode)
+    const error = new EmpvRuntimeProcessFailure(generation.id, reason, exitCode, exitSignal)
     generation.state = 'terminating'
     generation.terminalReason = reason
     generation.terminalError = error
@@ -360,13 +425,19 @@ export function createEmpvRuntimeClientWithFork(
     notifyListeners(generation, 'frame-listener', frameListeners, message)
   }
 
-  function handleExit(generation: Generation, code: number): void {
+  function handleExit(
+    generation: Generation,
+    code: number | null,
+    signal: NodeJS.Signals | null
+  ): void {
     if (currentGeneration !== generation || generation.state === 'stopped') return
 
-    const stoppedSessions = generation.sessions.map((session) => ({ ...session }))
+    const stoppedSessions = generation.sessions.map((session) => ({
+      ...session
+    }))
     const reason = generation.terminalReason ?? { type: 'unexpected-exit' }
-    beginTerminal(generation, reason, code)
-    const finalError = new EmpvRuntimeProcessFailure(generation.id, reason, code)
+    beginTerminal(generation, reason, code, signal)
+    const finalError = new EmpvRuntimeProcessFailure(generation.id, reason, code, signal)
     generation.state = 'stopped'
     generation.sessions = []
     currentGeneration = null
@@ -408,7 +479,7 @@ export function createEmpvRuntimeClientWithFork(
           generation: generation.id,
           terminalReason,
           error: new Error(
-            `UtilityProcess.kill() returned false for empv runtime generation ${generation.id}.`
+            `The runtime child process kill operation returned false for generation ${generation.id}.`
           )
         })
       }
@@ -430,7 +501,7 @@ export function createEmpvRuntimeClientWithFork(
       return Promise.reject(
         currentGeneration.terminalError ??
           new Error(
-            `The empv playback utility process generation ${currentGeneration.id} is not invokable (${currentGeneration.state}).`
+            `The empv playback runtime process generation ${currentGeneration.id} is not invokable (${currentGeneration.state}).`
           )
       )
     }
@@ -452,7 +523,7 @@ export function createEmpvRuntimeClientWithFork(
     }
 
     const generationId = nextGenerationId++
-    let child: UtilityProcess
+    let child: EmpvRuntimeChildProcess
     try {
       child = forkProcess(entryPath, [], {
         env: {
@@ -466,7 +537,7 @@ export function createEmpvRuntimeClientWithFork(
     } catch (error) {
       return Promise.reject(
         new Error(
-          `Failed to fork empv playback utility process generation ${generationId}: ${toError(error).message}`,
+          `Failed to fork empv playback runtime process generation ${generationId}: ${toError(error).message}`,
           { cause: error }
         )
       )
@@ -489,26 +560,26 @@ export function createEmpvRuntimeClientWithFork(
     }
     currentGeneration = generation
 
-    child.stdout?.on('data', (chunk: Buffer) => process.stdout.write(`${stdioPrefix} ${chunk}`))
-    child.stderr?.on('data', (chunk: Buffer) => process.stderr.write(`${stdioPrefix} ${chunk}`))
-    child.on('message', (message) =>
+    child.stdout?.on('data', (chunk: Buffer | string) =>
+      process.stdout.write(`${stdioPrefix} ${chunk}`)
+    )
+    child.stderr?.on('data', (chunk: Buffer | string) =>
+      process.stderr.write(`${stdioPrefix} ${chunk}`)
+    )
+    child.onMessage((message) =>
       handleMessage(generation, message as EmpvRuntimeResponse | EmpvRuntimeEvent)
     )
-    child.once('spawn', () => {
+    child.onceSpawn(() => {
       if (currentGeneration !== generation || generation.state !== 'spawning') return
       generation.state = 'running'
       settleSpawn(generation, { type: 'resolve' })
       if (options.onSpawn) runCallback(generation, 'onSpawn', options.onSpawn)
     })
-    child.once('exit', (code) => handleExit(generation, code))
-    child.once('error', (fatalType, location, report) => {
+    child.onceExit((code, signal) => handleExit(generation, code, signal))
+    child.onceFailure((failure) => {
       if (currentGeneration !== generation || generation.state === 'stopped') return
-      beginTerminal(generation, {
-        type: 'fatal-error',
-        fatalType,
-        location,
-        report
-      })
+      beginTerminal(generation, failure)
+      killGeneration(generation)
     })
 
     return generation.spawnPromise
@@ -583,17 +654,31 @@ export function createEmpvRuntimeClientWithFork(
               reject: settleReject,
               timeout
             })
+            const request = {
+              id,
+              method,
+              args
+            } as EmpvRuntimeRequest
+            const handleSendFailure = (error: Error): void => {
+              if (
+                currentGeneration !== spawnedGeneration ||
+                spawnedGeneration.state === 'stopped'
+              ) {
+                return
+              }
+              beginTerminal(spawnedGeneration, {
+                type: 'request-send-failure',
+                requestId: id,
+                method,
+                sessionId: requestSessionId(args),
+                message: error.message
+              })
+              killGeneration(spawnedGeneration)
+            }
             try {
-              spawnedGeneration.child.postMessage({ id, method, args } as EmpvRuntimeRequest)
+              spawnedGeneration.child.postMessage(request, handleSendFailure)
             } catch (error) {
-              spawnedGeneration.pendingRequests.delete(id)
-              clearTimeout(timeout)
-              settleReject(
-                new Error(
-                  `Failed to post empv runtime request ${method} (#${id}, generation ${spawnedGeneration.id}): ${toError(error).message}`,
-                  { cause: error }
-                )
-              )
+              handleSendFailure(toError(error))
             }
           },
           (error: unknown) => {

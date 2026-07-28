@@ -49,9 +49,9 @@ describe('createEmpvPlaybackHost', () => {
   })
 
   // The addon's first load validates code signatures and blocks whatever thread
-  // does it. Asking the utility process something trivial first makes that load
+  // does it. Asking the playback process something trivial first makes that load
   // happen there, so the main-process load lands on a warm kernel cache.
-  test('warms the utility process before loading the addon in this one', async () => {
+  test('warms the playback process before loading the addon in this one', async () => {
     const { loaded } = makeLayerAddon()
     const order: string[] = []
     const warming = makeFakeRuntimeClient({

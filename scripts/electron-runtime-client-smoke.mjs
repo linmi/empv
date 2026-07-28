@@ -5,8 +5,8 @@ import { app } from 'electron'
 
 import { createEmpvRuntimeClient, EmpvRuntimeProcessFailure } from '../dist/electron/index.js'
 
-const utilityEntry = fileURLToPath(
-  new URL('../tests/fixtures/runtimeClientUtility.mjs', import.meta.url)
+const runtimeEntry = fileURLToPath(
+  new URL('../tests/fixtures/runtimeClientProcess.mjs', import.meta.url)
 )
 const EXIT_TIMEOUT_MS = 5_000
 const REQUEST_TIMEOUT_MS = 1_000
@@ -19,7 +19,7 @@ function waitForNextExit(client) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       unsubscribe()
-      reject(new Error(`The utility process did not exit within ${EXIT_TIMEOUT_MS}ms.`))
+      reject(new Error(`The runtime process did not exit within ${EXIT_TIMEOUT_MS}ms.`))
     }, EXIT_TIMEOUT_MS)
     const unsubscribe = client.onExit((error, sessions) => {
       clearTimeout(timeout)
@@ -34,7 +34,7 @@ async function run() {
 
   const diagnostics = []
   const client = createEmpvRuntimeClient({
-    resolveEntryPath: () => utilityEntry,
+    resolveEntryPath: () => runtimeEntry,
     frameLinkServiceName: `empv.runtime-client-smoke.${process.pid}`,
     serviceName: 'empv Runtime Client Smoke',
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
